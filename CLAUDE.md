@@ -2,6 +2,13 @@
 
 Guidance for Claude Code (claude.ai/code) when working in this repository.
 
+## Documentation layout
+
+`README.md` is deliberately minimal — three steps to get running and nothing
+else. **Do not grow it.** Installer options, driver prerequisites, build and
+packaging detail, test notes and the notebook-defect list all belong in
+`docs/reference.md`; architecture notes belong here.
+
 ## Project overview
 
 Two PySide6 desktop applications for the FIFA fiber calibration at the Weizmann
