@@ -36,3 +36,8 @@ def user_data_dir():
     d = base / "FIFA"
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+def unit_table_path():
+    """The running per-unit results table, kept in the repo (or next to the exe)."""
+    return app_dir() / "results" / "units.json"

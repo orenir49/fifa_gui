@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QHeaderView, QLabel, QMainWindow, QMessageBox, QProgressBar, QPushButton,
     QSpinBox, QSplitter, QTabWidget, QTableView, QTreeWidget, QTreeWidgetItem,
     QVBoxLayout, QWidget,
+    QComboBox, QLineEdit, QTableWidget, QTableWidgetItem,
 )
 
 from fifa_gui import __version__
@@ -20,11 +21,13 @@ from fifa_gui.core import export as core_export
 from fifa_gui.core.centroid import find_centroid
 from fifa_gui.core.flexure import DEFAULT_DIAMETER_UM, flexure_stats
 from fifa_gui.core.imageio import scan_directory
+from fifa_gui.core.unittable import UnitEntry, UnitTable, guess_unit_name
 from fifa_gui.qtutil.imageview import (
     COLOR_BKG, COLOR_CENTROID, COLOR_OTHER, COLOR_ROI, COLOR_TRACK, ImageView,
 )
 from fifa_gui.qtutil.logpanel import LogPanel
 from fifa_gui.qtutil.mplcanvas import MplPanel
+from fifa_gui.paths import unit_table_path
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +40,7 @@ REFIT_DEBOUNCE_MS = 150
 
 
 class CalculateWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, unit_table_file=None):
         super().__init__()
         self.setWindowTitle(f"FIFA Calculate {__version__}")
         self.resize(1500, 950)
@@ -56,6 +59,12 @@ class CalculateWindow(QMainWindow):
         self._refit_timer.setInterval(REFIT_DEBOUNCE_MS)
         self._refit_timer.timeout.connect(self._refit_all)
 
+        try:
+            self.unit_table = UnitTable(unit_table_file or unit_table_path()).load()
+        except (OSError, ValueError) as exc:
+            self.unit_table = UnitTable(unit_table_file or unit_table_path())
+            QMessageBox.warning(self, "Unit table", f"Could not read the unit table:\n{exc}")
+
         self._build_ui()
         self._restore_settings()
         self.log.append_line(
@@ -71,6 +80,7 @@ class CalculateWindow(QMainWindow):
         self.tabs.addTab(self._build_track_tab(), "Track")
         self.tabs.addTab(self._build_inverse_tab(), "Inverse")
         self.tabs.addTab(self._build_flexure_tab(), "Flexure")
+        self.tabs.addTab(self._build_units_tab(), "Units")
         self.tabs.currentChanged.connect(lambda _: self._refresh_views())
 
         self.log = LogPanel()
@@ -311,6 +321,139 @@ class CalculateWindow(QMainWindow):
         layout.addWidget(self.inverse_label, 1)
         return widget
 
+    # ----------------------------------------------------------- units tab
+
+    UNIT_HEADERS = ["Unit", "a_x", "b_x", "a_y", "b_y", "RMS (px)", "Frames",
+                    "Updated (UTC)", "Source", "Stage", "x (col)", "y (row)"]
+
+    def _build_units_tab(self):
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        top = QHBoxLayout()
+        top.addWidget(QLabel("Unit:"))
+        self.unit_name = QLineEdit()
+        self.unit_name.setPlaceholderText("mast01")
+        self.unit_name.setMaximumWidth(140)
+        top.addWidget(self.unit_name)
+        self.unit_update_btn = QPushButton("Update from selected dataset")
+        self.unit_update_btn.setToolTip(
+            "Store the selected dataset's fit coefficients for this unit,\n"
+            "replacing the unit's previous entry, and save the table."
+        )
+        self.unit_update_btn.clicked.connect(self.update_unit_from_dataset)
+        top.addWidget(self.unit_update_btn)
+        self.unit_delete_btn = QPushButton("Delete unit")
+        self.unit_delete_btn.clicked.connect(self.delete_unit)
+        top.addWidget(self.unit_delete_btn)
+        top.addStretch(1)
+        layout.addLayout(top)
+
+        interp = QHBoxLayout()
+        interp.addWidget(QLabel("Interpolate:"))
+        self.interp_mode = QComboBox()
+        self.interp_mode.addItems(["stage + y from x", "x + y from stage"])
+        self.interp_mode.currentIndexChanged.connect(self._on_interp_mode)
+        interp.addWidget(self.interp_mode)
+        self.interp_value = QDoubleSpinBox()
+        self.interp_value.setRange(-1e9, 1e9)
+        self.interp_value.setDecimals(2)
+        self.interp_value.setValue(DEFAULT_X_TARGET)
+        self.interp_value.valueChanged.connect(lambda _: self._refresh_units())
+        interp.addWidget(self.interp_value)
+        interp.addStretch(1)
+        layout.addLayout(interp)
+
+        self.units_table = QTableWidget(0, len(self.UNIT_HEADERS))
+        self.units_table.setHorizontalHeaderLabels(self.UNIT_HEADERS)
+        self.units_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.units_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.units_table.verticalHeader().setVisible(False)
+        self.units_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.units_table.itemSelectionChanged.connect(self._on_unit_selected)
+        layout.addWidget(self.units_table, 1)
+
+        self.units_file_label = QLabel()
+        self.units_file_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        layout.addWidget(self.units_file_label)
+        self._on_interp_mode()
+        return widget
+
+    def _on_interp_mode(self, *_):
+        from_x = self.interp_mode.currentIndex() == 0
+        self.interp_value.setValue(DEFAULT_X_TARGET if from_x else DEFAULT_STAGE_SPEC)
+        self.interp_value.setPrefix("x = " if from_x else "stage = ")
+        self.interp_value.setDecimals(2 if from_x else 0)
+        self._refresh_units()
+
+    def _on_unit_selected(self):
+        rows = self.units_table.selectionModel().selectedRows()
+        if rows:
+            self.unit_name.setText(self.units_table.item(rows[0].row(), 0).text())
+
+    def update_unit_from_dataset(self):
+        dataset = self._current_dataset()
+        name = self.unit_name.text().strip()
+        if dataset is None or dataset.fit is None:
+            QMessageBox.information(self, "Unit table", "Select a dataset with a fit first.")
+            return
+        if not name:
+            name = guess_unit_name(dataset.directory)
+            self.unit_name.setText(name)
+        entry = UnitEntry.from_fit(name, dataset.fit, source=dataset.directory)
+        replaced = self.unit_table.update(entry)
+        try:
+            self.unit_table.save()
+        except OSError as exc:
+            QMessageBox.warning(self, "Unit table", f"Could not save the table:\n{exc}")
+        self.log.append_line(
+            f"{'Updated' if replaced else 'Added'} {name} in the unit table "
+            f"(a_x={entry.coef_x[0]:.4e}, b_x={entry.coef_x[1]:.2f})."
+        )
+        self._refresh_units()
+
+    def delete_unit(self):
+        name = self.unit_name.text().strip()
+        if name not in self.unit_table.units:
+            return
+        if QMessageBox.question(self, "Delete unit", f"Remove {name} from the table?") \
+                != QMessageBox.Yes:
+            return
+        self.unit_table.remove(name)
+        try:
+            self.unit_table.save()
+        except OSError as exc:
+            QMessageBox.warning(self, "Unit table", f"Could not save the table:\n{exc}")
+        self._refresh_units()
+
+    def _refresh_units(self):
+        table = self.units_table
+        from_x = self.interp_mode.currentIndex() == 0
+        value = self.interp_value.value()
+        interp = {n: (a, b) for n, a, b in
+                  (self.unit_table.at_x(value) if from_x else self.unit_table.at_stage(value))}
+
+        entries = self.unit_table.entries()
+        table.setRowCount(len(entries))
+        for r, e in enumerate(entries):
+            cells = [
+                e.name, f"{e.coef_x[0]:.6e}", f"{e.coef_x[1]:.3f}",
+                f"{e.coef_y[0]:.6e}", f"{e.coef_y[1]:.3f}",
+                "" if e.rms_px != e.rms_px else f"{e.rms_px:.3f}",
+                str(e.n_frames), e.updated_utc, e.source,
+            ]
+            if e.name in interp:
+                a, b = interp[e.name]
+                if from_x:      # a = stage, b = y
+                    cells += [f"{a:.0f}", f"{value:.2f}", f"{b:.2f}"]
+                else:           # a = x, b = y
+                    cells += [f"{value:.0f}", f"{a:.2f}", f"{b:.2f}"]
+            else:
+                cells += ["n/a", "", ""]
+            for c, text in enumerate(cells):
+                table.setItem(r, c, QTableWidgetItem(text))
+        self.units_file_label.setText(f"Table file: {self.unit_table.path}")
+
     # --------------------------------------------------------- flexure tab
 
     def _build_flexure_tab(self):
@@ -502,6 +645,7 @@ class CalculateWindow(QMainWindow):
         self._refresh_views()
 
     def _refresh_views(self):
+        self._refresh_units()
         self._draw_track()
         self._draw_residuals()
         self._update_result_label()

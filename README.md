@@ -149,6 +149,11 @@ Saturated frames are logged and kept — Calculate flags them for exclusion.
    `session.json` and the three plots as PNG. `session.json` restores the
    include flags and manual overrides via **File → Open session** — centroid QA
    is human judgement, and it would otherwise be lost when the window closes.
+7. **Units tab** keeps a running table of fit coefficients per unit
+   (`results/units.json`, tracked in git). Select a dataset, name the unit
+   (guessed from `.../mast03/1`) and press **Update from selected dataset**;
+   the unit's row is replaced. The same tab interpolates every unit at once:
+   stage + y from a target x, or x + y from a stage position.
 
 ### Conventions and corrections
 

@@ -300,3 +300,34 @@ def test_session_round_trip_restores_judgements(window, qapp, dataset_a,
     restored = {r.name: r for r in window.datasets[0].records}
     assert restored[excluded].include is False
     assert restored[overridden].overridden
+
+
+# --------------------------------------------------------------- unit table
+
+def test_unit_table_update_and_interpolate(window, qapp, dataset_a, tmp_path):
+    from fifa_gui.core.unittable import UnitTable
+
+    path = tmp_path / "units.json"
+    window.unit_table = UnitTable(path)
+    _load(window, qapp, dataset_a)
+    window.tree.setCurrentItem(window.tree.topLevelItem(0))
+    window.unit_name.setText("mast01")
+    window.update_unit_from_dataset()
+
+    saved = UnitTable(path).load()
+    entry = saved.units["mast01"]
+    fit = window.datasets[0].fit
+    assert entry.coef_x == pytest.approx(tuple(fit.coef_x))
+    assert entry.xy_at(300000) == pytest.approx((fit.x_at(300000), fit.y_at(300000)))
+
+    # inverse round trip, and the GUI table fills the interpolated columns
+    x, y = entry.xy_at(250000)
+    w, y2 = entry.stage_for_x(x)
+    assert w == pytest.approx(250000) and y2 == pytest.approx(y)
+    window.interp_mode.setCurrentIndex(1)
+    window.interp_value.setValue(250000)
+    assert window.units_table.item(0, 10).text() == f"{x:.2f}"
+
+    # updating again replaces, never duplicates
+    window.update_unit_from_dataset()
+    assert len(window.unit_table.units) == 1
