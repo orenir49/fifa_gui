@@ -1,0 +1,271 @@
+"""Calibrate app behaviour, driven headlessly against fake devices.
+
+Nothing here opens the real camera or stage: they are on a shared bench and may
+be in use. The no-hardware path is also exercised directly, because "the window
+still opens on a PC with no devices" is a requirement, not a nicety.
+"""
+
+import json
+import os
+import time
+
+import numpy as np
+import pytest
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+from PySide6.QtWidgets import QApplication  # noqa: E402
+
+from fifa_gui.apps.calibrate import commands  # noqa: E402
+from fifa_gui.apps.calibrate.worker import (  # noqa: E402
+    STATE_ABORTED, STATE_DONE, STATE_WAITING_OPERATOR, AcquisitionWorker,
+)
+from fifa_gui.core.sequence import CameraSettings, SequencePlan  # noqa: E402
+from tests.fakes import LEFT, RIGHT, FakeCamera, FakeStage  # noqa: E402
+
+
+@pytest.fixture(scope="session")
+def qapp():
+    yield QApplication.instance() or QApplication([])
+
+
+@pytest.fixture
+def worker(qapp):
+    """A worker with fake devices already attached, driven synchronously.
+
+    The worker normally lives on its own QThread; here the sequence is called
+    directly so the test can step through it deterministically.
+    """
+    w = AcquisitionWorker()
+    w._camera = FakeCamera()
+    w._stage = FakeStage()
+    w._camera.open()
+    w._stage.open()
+    yield w
+    w._close_devices()
+
+
+def _plan(tmp_path, **kwargs):
+    kwargs.setdefault("targets", [285000, 295000])
+    kwargs.setdefault("out_dir", str(tmp_path))
+    kwargs.setdefault("pause_for_operator", False)
+    kwargs.setdefault("settle_ms", 0)
+    kwargs.setdefault("camera", CameraSettings(exposure_ms=1))
+    return SequencePlan(**kwargs)
+
+
+# ------------------------------------------------------------- the sequence
+
+def test_sequence_saves_one_frame_per_position(worker, qapp, tmp_path):
+    states = []
+    worker.state_changed.connect(lambda s, p: states.append(s))
+    worker._run_sequence(_plan(tmp_path))
+    worker._savers.waitForDone()
+    qapp.processEvents()
+
+    saved = sorted(p for p in os.listdir(tmp_path) if p.endswith(".npy"))
+    assert saved == ["284999.npy", "294999.npy"] or len(saved) == 2
+    assert STATE_DONE in states
+    assert worker._camera.exposures == 2
+
+
+def test_frames_are_named_after_the_achieved_position(worker, qapp, tmp_path):
+    # The fake stage lands exactly on the target, so the names are the targets.
+    # The real one lands a step short, which is why the notebook's files are
+    # 284999.npy for a 285000 target -- the name follows what was reached.
+    worker._run_sequence(_plan(tmp_path, targets=[285000]))
+    worker._savers.waitForDone()
+    assert os.path.exists(tmp_path / "285000.npy")
+
+
+def test_the_stage_retracts_by_the_backoff_before_exposing(worker, qapp, tmp_path):
+    worker._run_sequence(_plan(tmp_path, targets=[285000], backoff=110000))
+    assert worker._stage.moves == [285000, 175000]
+
+
+def test_repeats_get_a_suffix(worker, qapp, tmp_path):
+    worker._run_sequence(_plan(tmp_path, targets=[324998], repeats=3))
+    worker._savers.waitForDone()
+    names = sorted(p for p in os.listdir(tmp_path) if p.endswith(".npy"))
+    assert names == ["324998_0.npy", "324998_1.npy", "324998_2.npy"]
+
+
+def test_saved_frames_are_complete_and_readable(worker, qapp, tmp_path):
+    worker._run_sequence(_plan(tmp_path, targets=[285000]))
+    worker._savers.waitForDone()
+    arr = np.load(tmp_path / "285000.npy")
+    assert arr.shape == (120, 160) and arr.dtype == np.uint16
+    # No .part file is left behind: the write is atomic.
+    assert not any(p.endswith(".part") for p in os.listdir(tmp_path))
+
+
+def test_exposure_is_taken_once_per_frame(worker, qapp, tmp_path):
+    # The notebook called start_exposure() and then capture(), which starts
+    # another one, so every frame was exposed twice.
+    worker._run_sequence(_plan(tmp_path, targets=[285000, 295000, 305000]))
+    assert worker._camera.exposures == 3
+
+
+# ------------------------------------------------------- the operator pause
+
+def test_pause_waits_for_continue(worker, qapp, tmp_path):
+    import threading
+
+    states = []
+    worker.state_changed.connect(lambda s, p: states.append(s))
+
+    done = threading.Event()
+
+    def run():
+        worker._run_sequence(_plan(tmp_path, targets=[285000],
+                                   pause_for_operator=True))
+        done.set()
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+
+    # The sequence runs on another thread, so its signals arrive by queued
+    # connection and only land once this thread pumps its event loop.
+    deadline = time.monotonic() + 5
+    while STATE_WAITING_OPERATOR not in states and time.monotonic() < deadline:
+        qapp.processEvents()
+        time.sleep(0.01)
+    assert STATE_WAITING_OPERATOR in states, "sequence did not pause"
+    assert not done.is_set(), "sequence continued without the operator"
+
+    worker.operator_continue()
+    assert done.wait(10), "sequence did not resume after Continue"
+    qapp.processEvents()
+    assert STATE_DONE in states
+
+
+def test_abort_during_a_pause_stops_the_run(worker, qapp, tmp_path):
+    import threading
+
+    states = []
+    worker.state_changed.connect(lambda s, p: states.append(s))
+    done = threading.Event()
+
+    def run():
+        worker._run_sequence(_plan(tmp_path, targets=[285000, 295000],
+                                   pause_for_operator=True))
+        done.set()
+
+    threading.Thread(target=run, daemon=True).start()
+    deadline = time.monotonic() + 5
+    while STATE_WAITING_OPERATOR not in states and time.monotonic() < deadline:
+        qapp.processEvents()
+        time.sleep(0.01)
+    assert STATE_WAITING_OPERATOR in states, "sequence did not pause"
+
+    worker.request_abort()
+    assert done.wait(10)
+    qapp.processEvents()
+    assert STATE_ABORTED in states
+    assert not [p for p in os.listdir(tmp_path) if p.endswith(".npy")]
+
+
+# ------------------------------------------------------------- provenance
+
+def test_a_run_record_is_written_next_to_the_data(worker, qapp, tmp_path):
+    worker._run_sequence(_plan(tmp_path, targets=[285000, 295000]))
+    worker._savers.waitForDone()
+
+    records = [p for p in os.listdir(tmp_path) if p.startswith("run_")]
+    assert len(records) == 1
+    payload = json.loads((tmp_path / records[0]).read_text())
+    assert payload["outcome"] == "complete"
+    assert len(payload["frames"]) == 2
+    frame = payload["frames"][0]
+    assert {"file", "target", "achieved", "peak_adu", "saturated"} <= set(frame)
+    assert payload["plan"]["backoff"] == 110000
+
+
+def test_saturation_is_recorded_but_does_not_stop_the_run(worker, qapp, tmp_path):
+    worker._camera.peak = 65520        # the 12-bit full well in RAW16
+    logged = []
+    worker.log.connect(lambda level, text: logged.append(text))
+
+    worker._run_sequence(_plan(tmp_path, targets=[285000]))
+    worker._savers.waitForDone()
+
+    assert os.path.exists(tmp_path / "285000.npy"), "a saturated frame is still saved"
+    assert any("SATURATED" in text for text in logged)
+    record = next(p for p in os.listdir(tmp_path) if p.startswith("run_"))
+    assert json.loads((tmp_path / record).read_text())["frames"][0]["saturated"]
+
+
+# ---------------------------------------------------------- the window
+
+def test_window_opens_with_no_hardware(qapp, monkeypatch):
+    # The requirement: the exe opens on any Windows PC. Probing must not be able
+    # to stop the window appearing, however it fails.
+    from fifa_gui.hardware.base import NullCamera, NullStage
+    from fifa_gui.hardware.discovery import ProbeResult
+
+    # Patch the name the worker actually resolves: it imported probe directly.
+    monkeypatch.setattr(
+        "fifa_gui.apps.calibrate.worker.probe",
+        lambda **kwargs: ProbeResult(
+            camera=NullCamera(), stage=NullStage(),
+            problems=[("camera", "No ZWO camera detected.", "Check the USB3 cable."),
+                      ("stage", "No XIMC stage controller found.", "Check the driver.")],
+        ),
+    )
+
+    from fifa_gui.apps.calibrate.window import CalibrateWindow
+
+    win = CalibrateWindow()
+    win.show()
+    deadline = time.monotonic() + 10
+    while win.banner_label.text().startswith("Looking") and time.monotonic() < deadline:
+        qapp.processEvents()
+        time.sleep(0.01)
+
+    assert win.isVisible()
+    assert win.banner.isVisible()
+    assert "No camera" in win.banner_label.text()
+    assert not win.start_btn.isEnabled()
+    assert not win.continue_btn.isEnabled()
+    assert "No stage connected." in win.start_btn.toolTip()
+    win.close()
+    qapp.processEvents()
+
+
+def test_importing_the_entry_point_does_not_touch_the_drivers():
+    # libximc loads native DLLs at import and raises without the MSVC++ 2013
+    # redistributable, so it must never be imported at module scope.
+    import subprocess
+    import sys
+
+    code = (
+        "import sys; import fifa_gui.apps.calibrate_main as m; "
+        "print('libximc' in sys.modules, 'zwoasi' in sys.modules)"
+    )
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip().endswith("False False"), out.stdout
+
+
+def test_no_connect_opens_without_touching_the_devices(qapp, monkeypatch):
+    # The bench is shared, so the app must be startable without opening the
+    # camera or the stage. Probing must not happen at all in this mode.
+    called = []
+    monkeypatch.setattr(
+        "fifa_gui.apps.calibrate.worker.probe",
+        lambda **kwargs: called.append(kwargs),
+    )
+    from fifa_gui.apps.calibrate.window import CalibrateWindow
+
+    win = CalibrateWindow(auto_connect=False)
+    win.show()
+    for _ in range(50):
+        qapp.processEvents()
+        time.sleep(0.01)
+
+    assert called == [], "probe() ran despite --no-connect"
+    assert win.isVisible()
+    assert "--no-connect" in win.banner_label.text()
+    assert not win.start_btn.isEnabled()
+    win.close()
+    qapp.processEvents()

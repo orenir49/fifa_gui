@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fifa-gui"
+version = "0.1.0"
+description = "FIFA fiber calibration: acquisition and analysis desktop applications"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "numpy>=2.4,<3",
+    "PySide6-Essentials>=6.11,<6.13",
+    "matplotlib>=3.10,<4",
+    "pillow>=12,<13",
+    "astropy>=7.2,<8",
+]
+
+[project.optional-dependencies]
+hardware = ["zwoasi==0.2.0", "libximc==3.0.3"]
+build = ["pyinstaller==6.22.3", "pyinstaller-hooks-contrib==2026.8"]
+
+[project.gui-scripts]
+fifa-calibrate = "fifa_gui.apps.calibrate_main:main"
+fifa-calculate = "fifa_gui.apps.calculate_main:main"
+
+[tool.setuptools.packages.find]
+include = ["fifa_gui*"]

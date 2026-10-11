@@ -1,0 +1,9 @@
+# Build machine: everything needed to produce the .exe bundles.
+-r requirements-hardware.txt
+
+pyinstaller==6.22.3
+pyinstaller-hooks-contrib==2026.8
+
+# Test-only: the reference implementation core.centroid is checked against.
+photutils==3.0.0
+pytest==8.4.2

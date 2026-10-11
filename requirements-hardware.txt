@@ -1,0 +1,5 @@
+# Lab PC: adds camera and stage control on top of the shared runtime.
+-r requirements.txt
+
+zwoasi==0.2.0     # pure-python ctypes wrapper; ASICamera2.dll is NOT pip-installable
+libximc==3.0.3    # bundles its win64 DLLs as package data; needs the MSVC++ 2013 x64 redist
