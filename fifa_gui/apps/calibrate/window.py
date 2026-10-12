@@ -8,10 +8,10 @@ import numpy as np
 from PySide6.QtCore import QSettings, Qt, QThread, Slot
 from PySide6.QtGui import QAction, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame,
-    QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow,
-    QMessageBox, QProgressBar, QPushButton, QScrollArea, QSpinBox, QSplitter,
-    QTableView, QVBoxLayout, QWidget,
+    QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFormLayout,
+    QFrame, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
+    QMainWindow, QMessageBox, QProgressBar, QPushButton, QSpinBox,
+    QSplitter, QTableView, QVBoxLayout, QWidget,
 )
 
 from fifa_gui import __version__
@@ -105,16 +105,15 @@ class CalibrateWindow(QMainWindow):
         banner_layout.addWidget(details)
         banner_layout.addWidget(reconnect)
 
-        left = QScrollArea()
-        left.setWidgetResizable(True)
+        # The stage and camera panels are behind the compact row at the top,
+        # in windows of their own: the left column belongs to the sweep,
+        # which is what an operator actually drives during a run.
+        left = QWidget()
         left.setFixedWidth(430)
-        panel = QWidget()
-        panel_layout = QVBoxLayout(panel)
-        panel_layout.addWidget(self._build_stage_box())
-        panel_layout.addWidget(self._build_camera_box())
-        panel_layout.addWidget(self._build_sequence_box())
-        panel_layout.addStretch(1)
-        left.setWidget(panel)
+        panel_layout = QVBoxLayout(left)
+        panel_layout.setContentsMargins(0, 0, 0, 0)
+        panel_layout.addLayout(self._build_hardware_row())
+        panel_layout.addWidget(self._build_sequence_box(), 1)
 
         right = QSplitter(Qt.Vertical)
         right.addWidget(self._build_preview_box())
@@ -174,6 +173,68 @@ class CalibrateWindow(QMainWindow):
         self.pause_banner.setVisible(False)
         return self.pause_banner
 
+    def _build_hardware_row(self):
+        """Compact entry points to the stage and camera, plus the live readouts.
+
+        Both panels are only touched at the start of a session -- pick a URI,
+        set gain and exposure -- so they do not earn permanent space, but the
+        position and the sensor temperature are watched throughout and stay on
+        the main window. Test exposure stays here too: it is used between
+        positions, as part of running the sweep.
+        """
+        self.position_label = QLabel("position: -")
+        self.position_label.setStyleSheet(
+            "font-family: Consolas, monospace; font-size: 13pt;"
+        )
+        self.temp_label = QLabel("sensor: -")
+        self.temp_label.setStyleSheet("color: grey;")
+
+        self.test_btn = QPushButton("Test exposure")
+        self.test_btn.setToolTip("Take one frame and show it, without saving")
+        self.test_btn.clicked.connect(
+            lambda: self.worker.post(commands.TestExposure(self._camera_settings()))
+        )
+
+        self.stage_dialog = self._popup("Stage", self._build_stage_box())
+        self.camera_dialog = self._popup("Camera", self._build_camera_box())
+
+        stage_btn = QPushButton("Stage...")
+        stage_btn.setToolTip("Controller URI, home, stop, and jog to a position")
+        stage_btn.clicked.connect(lambda: self._show_popup(self.stage_dialog))
+        camera_btn = QPushButton("Camera...")
+        camera_btn.setToolTip("Gain, exposure, image type and cooler")
+        camera_btn.clicked.connect(lambda: self._show_popup(self.camera_dialog))
+
+        buttons = QHBoxLayout()
+        buttons.addWidget(stage_btn)
+        buttons.addWidget(camera_btn)
+        buttons.addWidget(self.test_btn, 1)
+
+        layout = QVBoxLayout()
+        layout.addLayout(buttons)
+        layout.addWidget(self.position_label)
+        layout.addWidget(self.temp_label)
+        return layout
+
+    def _popup(self, title, inner):
+        """Put a control box in a window of its own.
+
+        Modeless, so the stage can be jogged while the preview is watched, and
+        Qt.Tool so it floats above the main window instead of hiding behind it.
+        """
+        dialog = QDialog(self)
+        dialog.setWindowTitle(title)
+        dialog.setWindowFlag(Qt.Tool)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.addWidget(inner)
+        return dialog
+
+    def _show_popup(self, dialog):
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
     def _build_stage_box(self):
         box = QGroupBox("Stage")
         layout = QVBoxLayout(box)
@@ -182,8 +243,6 @@ class CalibrateWindow(QMainWindow):
         self.stage_uri.setEditable(True)
         self.stage_uri.lineEdit().setPlaceholderText(r"auto-detect, or xi-com:\\.\COM5")
 
-        self.position_label = QLabel("position: -")
-        self.position_label.setStyleSheet("font-family: Consolas, monospace; font-size: 13pt;")
         self.limits_label = QLabel("limits: -")
 
         self.home_btn = QPushButton("Home")
@@ -203,7 +262,6 @@ class CalibrateWindow(QMainWindow):
         form = QFormLayout()
         form.addRow("URI", self.stage_uri)
         layout.addLayout(form)
-        layout.addWidget(self.position_label)
         layout.addWidget(self.limits_label)
 
         buttons = QHBoxLayout()
@@ -252,7 +310,6 @@ class CalibrateWindow(QMainWindow):
         self.target_temp.setRange(-40, 30)
         self.target_temp.setValue(-10)
         self.target_temp.setSuffix(" C")
-        self.temp_label = QLabel("sensor: -")
 
         form = QFormLayout()
         form.addRow("Gain", self.gain)
@@ -266,19 +323,9 @@ class CalibrateWindow(QMainWindow):
         self.apply_btn.clicked.connect(
             lambda: self.worker.post(commands.ApplyCamera(self._camera_settings()))
         )
-        self.test_btn = QPushButton("Test exposure")
-        self.test_btn.setToolTip("Take one frame and show it, without saving")
-        self.test_btn.clicked.connect(
-            lambda: self.worker.post(commands.TestExposure(self._camera_settings()))
-        )
-        buttons = QHBoxLayout()
-        buttons.addWidget(self.apply_btn)
-        buttons.addWidget(self.test_btn)
-
         layout.addWidget(self.camera_label)
         layout.addLayout(form)
-        layout.addWidget(self.temp_label)
-        layout.addLayout(buttons)
+        layout.addWidget(self.apply_btn)
         return box
 
     def _build_sequence_box(self):
@@ -315,7 +362,7 @@ class CalibrateWindow(QMainWindow):
         self.position_view.setModel(self.position_model)
         self.position_view.verticalHeader().setVisible(False)
         self.position_view.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.position_view.setMaximumHeight(200)
+        self.position_view.setMinimumHeight(220)
         # Without SelectRows, clicking a cell selects only that cell and
         # selectedRows() comes back empty -- which made +/-/^/v silently do
         # nothing. ExtendedSelection lets several rows be removed at once.
@@ -374,7 +421,7 @@ class CalibrateWindow(QMainWindow):
         self.sweep_limits_label.setStyleSheet("font-weight: bold;")
         layout.addWidget(QLabel("Positions"))
         layout.addWidget(self.sweep_limits_label)
-        layout.addWidget(self.position_view)
+        layout.addWidget(self.position_view, 1)
         layout.addLayout(table_buttons)
         layout.addWidget(self.count_label)
         layout.addWidget(self.validation_label)

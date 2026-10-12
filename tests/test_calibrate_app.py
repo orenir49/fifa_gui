@@ -516,3 +516,77 @@ def test_last_frame_scaling_does_not_wash_out_a_point_source(qapp, monkeypatch):
 
     win.close()
     qapp.processEvents()
+
+
+# ------------------------------------------------- the left column's layout
+
+def _in_window(widget, ancestor):
+    """True when `widget` is shown inside `ancestor` rather than its own window."""
+    while widget is not None:
+        if widget is ancestor:
+            return True
+        widget = widget.parentWidget()
+    return False
+
+
+def _no_hardware_window(monkeypatch):
+    from fifa_gui.apps.calibrate.window import CalibrateWindow
+    from fifa_gui.hardware.base import NullCamera, NullStage
+    from fifa_gui.hardware.discovery import ProbeResult
+
+    monkeypatch.setattr(
+        "fifa_gui.apps.calibrate.worker.probe",
+        lambda **kwargs: ProbeResult(camera=NullCamera(), stage=NullStage(), problems=[]),
+    )
+    return CalibrateWindow(auto_connect=False)
+
+
+def test_the_hardware_panels_are_not_embedded_in_the_left_column(qapp, monkeypatch):
+    """The sweep owns the left column; stage and camera are behind buttons.
+
+    They are set once at the start of a session, so they do not earn permanent
+    space next to the thing the operator drives all run.
+    """
+    win = _no_hardware_window(monkeypatch)
+    central = win.centralWidget()
+
+    for widget in (win.position_view, win.start_btn, win.out_dir):
+        assert _in_window(widget, central)
+    for widget in (win.stage_uri, win.home_btn, win.goto_spin, win.goto_btn,
+                   win.gain, win.exposure, win.image_type, win.apply_btn):
+        assert not _in_window(widget, central)
+
+    # The readouts that are watched throughout a run stay on the main window,
+    # along with Test exposure, which is used between positions.
+    for widget in (win.position_label, win.temp_label, win.test_btn):
+        assert _in_window(widget, central)
+
+    assert not win.stage_dialog.isVisible()
+    assert not win.camera_dialog.isVisible()
+    win.close()
+    qapp.processEvents()
+
+
+def test_the_compact_buttons_open_the_hardware_panels(qapp, monkeypatch):
+    from PySide6.QtWidgets import QPushButton
+
+    win = _no_hardware_window(monkeypatch)
+    buttons = {b.text(): b for b in win.centralWidget().findChildren(QPushButton)}
+    assert "Stage..." in buttons and "Camera..." in buttons
+
+    # click() returning at all is half the point: a modal dialog would block
+    # here, and the preview has to stay watchable while the stage is jogged.
+    buttons["Stage..."].click()
+    buttons["Camera..."].click()
+    qapp.processEvents()
+    assert win.stage_dialog.isVisible()
+    assert win.camera_dialog.isVisible()
+    assert not win.stage_dialog.isModal()
+    assert not win.camera_dialog.isModal()
+
+    # The controls still drive the same widgets, wherever they are shown.
+    assert _in_window(win.home_btn, win.stage_dialog)
+    assert _in_window(win.exposure, win.camera_dialog)
+
+    win.close()
+    qapp.processEvents()
