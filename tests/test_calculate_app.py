@@ -29,9 +29,7 @@ def qapp():
 
 @pytest.fixture
 def window(qapp):
-    from PySide6.QtCore import QSettings
-
-    QSettings.setDefaultFormat(QSettings.IniFormat)
+    # QSettings is redirected to a temp dir by the isolated_qsettings fixture.
     win = CalculateWindow()
     win.setAttribute(Qt.WA_DeleteOnClose, True)
     yield win

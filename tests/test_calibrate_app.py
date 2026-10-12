@@ -50,7 +50,7 @@ def _plan(tmp_path, **kwargs):
     kwargs.setdefault("out_dir", str(tmp_path))
     kwargs.setdefault("pause_for_operator", False)
     kwargs.setdefault("settle_ms", 0)
-    kwargs.setdefault("camera", CameraSettings(exposure_ms=1))
+    kwargs.setdefault("camera", CameraSettings(exposure_us=1000))
     return SequencePlan(**kwargs)
 
 
@@ -224,7 +224,12 @@ def test_window_opens_with_no_hardware(qapp, monkeypatch):
 
     assert win.isVisible()
     assert win.banner.isVisible()
-    assert "No camera" in win.banner_label.text()
+    # The message has to name the usual culprits: the device is far more often
+    # held by another program than actually absent.
+    banner = win.banner_label.text()
+    assert "Unable to connect" in banner
+    for culprit in ("ASIStudio", "XILab", "Jupyter"):
+        assert culprit in banner
     assert not win.start_btn.isEnabled()
     assert not win.continue_btn.isEnabled()
     assert "No stage connected." in win.start_btn.toolTip()
@@ -267,5 +272,247 @@ def test_no_connect_opens_without_touching_the_devices(qapp, monkeypatch):
     assert win.isVisible()
     assert "--no-connect" in win.banner_label.text()
     assert not win.start_btn.isEnabled()
+    win.close()
+    qapp.processEvents()
+
+
+# ------------------------------------------------------- exposure and targets
+
+def test_exposure_is_in_microseconds():
+    # ASI_EXPOSURE takes microseconds, and the useful end for a bright fiber
+    # spot is ~32 us -- a control that bottomed out at 1 ms could not reach it.
+    from fifa_gui.core.sequence import DEFAULT_EXPOSURE_US
+
+    s = CameraSettings(exposure_us=32)
+    assert DEFAULT_EXPOSURE_US == 32
+    assert s.exposure_ms == pytest.approx(0.032)
+    assert s.exposure_s == pytest.approx(3.2e-5)
+
+
+def test_old_plans_with_milliseconds_still_load(tmp_path):
+    plan = SequencePlan.from_dict(
+        {"targets": [285000], "out_dir": "x", "camera": {"exposure_ms": 2.5}}
+    )
+    assert plan.camera.exposure_us == 2500
+
+
+def test_the_configured_exposure_reaches_the_camera(worker, qapp, tmp_path):
+    worker._run_sequence(_plan(tmp_path, targets=[285000],
+                               camera=CameraSettings(exposure_us=32)))
+    assert worker._camera.settings.exposure_us == 32
+
+
+def test_position_table_add_and_remove(qapp, monkeypatch):
+    from fifa_gui.hardware.base import NullCamera, NullStage
+    from fifa_gui.hardware.discovery import ProbeResult
+    from fifa_gui.apps.calibrate.window import CalibrateWindow
+
+    monkeypatch.setattr(
+        "fifa_gui.apps.calibrate.worker.probe",
+        lambda **kwargs: ProbeResult(camera=NullCamera(), stage=NullStage(), problems=[]),
+    )
+    win = CalibrateWindow(auto_connect=False)
+    model = win.position_model
+    assert model.rowCount() == 6           # the standard sweep
+
+    # Trimming six down to two is the thing that did not work: with no row
+    # selected, selectedRows() is empty and both buttons silently did nothing.
+    for _ in range(4):
+        win._remove_position()
+    assert model.rowCount() == 2
+    assert len(win._plan().targets) == 2
+
+    win.position_view.selectRow(0)
+    win._add_position()
+    assert model.rowCount() == 3
+
+    win._clear_positions()
+    assert model.rowCount() == 0
+    # Adding to an empty table must still produce a usable position.
+    win._add_position()
+    assert model.rowCount() == 1
+    assert model.targets[0] > 0
+
+    win.close()
+    qapp.processEvents()
+
+
+def test_pause_prompt_mentions_the_nd_filter(qapp, monkeypatch):
+    # Forgetting to put the ND filter back is what saturates the frame, so the
+    # prompt has to name it, not just say "recentre".
+    from fifa_gui.apps.calibrate.window import (
+        CONTINUE_WAITING_STYLE, PAUSE_PROMPT, CalibrateWindow,
+    )
+    from fifa_gui.apps.calibrate.worker import STATE_WAITING_OPERATOR
+    from fifa_gui.hardware.base import NullCamera, NullStage
+    from fifa_gui.hardware.discovery import ProbeResult
+
+    monkeypatch.setattr(
+        "fifa_gui.apps.calibrate.worker.probe",
+        lambda **kwargs: ProbeResult(camera=NullCamera(), stage=NullStage(), problems=[]),
+    )
+    for word in ("CENTER", "FIBER", "ND FILTER", "CONTINUE"):
+        assert word in PAUSE_PROMPT.upper()
+
+    win = CalibrateWindow(auto_connect=False)
+    win.show()                      # isVisible() is False on a hidden parent
+    qapp.processEvents()
+    assert not win.pause_banner.isVisible()
+
+    win._on_state(STATE_WAITING_OPERATOR, {"position": 284999})
+    qapp.processEvents()
+    assert win.pause_banner.isVisible()
+    assert "ND FILTER" in win.pause_label.text().upper()
+    assert "284,999" in win.pause_label.text()
+    assert win.continue_btn.isEnabled()
+    assert win.continue_btn.styleSheet() == CONTINUE_WAITING_STYLE
+    assert win.continue_btn.minimumHeight() >= 80
+
+    win._on_state("RUNNING", {})
+    qapp.processEvents()
+    assert not win.pause_banner.isVisible()
+    assert win.continue_btn.styleSheet() == ""
+
+    win.close()
+    qapp.processEvents()
+
+
+def test_log_stretch_lifts_a_faint_halo_out_of_the_floor():
+    # A linear stretch renders a near-saturated core as a white dot and the
+    # halo as black; the log stretch is what makes centring visible.
+    import numpy as np
+
+    from fifa_gui.qtutil.imageview import to_qimage
+
+    arr = np.full((8, 8), 650, dtype=np.uint16)
+    arr[4, 4] = 65000      # core
+    arr[4, 5] = 2000       # faint halo, ~2% of the core above the floor
+
+    lo, hi = 650.0, 65000.0
+    linear = to_qimage(arr, lo, hi, log=False)._backing
+    logged = to_qimage(arr, lo, hi, log=True)._backing
+
+    assert linear[4, 5] < 10, "halo should be invisible on a linear stretch"
+    assert logged[4, 5] > 80, "halo should be clearly visible on a log stretch"
+    assert logged[4, 4] > logged[4, 5] > logged[0, 0]
+
+
+def test_sequence_homes_before_running(worker, qapp, tmp_path):
+    # Every run must start from the same datum, so the positions in the file
+    # names mean the same thing across runs.
+    assert worker._stage.homed == 0
+    worker._run_sequence(_plan(tmp_path, targets=[285000]))
+    worker._savers.waitForDone()
+
+    assert worker._stage.homed == 1
+    assert worker._stage.moves[0] == 285000, "homing must precede the first move"
+
+    record = next(p for p in os.listdir(tmp_path) if p.startswith("run_"))
+    payload = json.loads((tmp_path / record).read_text())
+    assert payload["homed_before_sequence"] is True
+    assert payload["position_after_home"] == 0
+
+
+def test_default_sweep_is_the_standard_six_positions(qapp, monkeypatch):
+    # The list deliberately does not persist: a trimmed-down test run must not
+    # silently become the starting point for the next real run.
+    from fifa_gui.apps.calibrate.window import DEFAULT_TARGETS, CalibrateWindow
+    from fifa_gui.hardware.base import NullCamera, NullStage
+    from fifa_gui.hardware.discovery import ProbeResult
+
+    monkeypatch.setattr(
+        "fifa_gui.apps.calibrate.worker.probe",
+        lambda **kwargs: ProbeResult(camera=NullCamera(), stage=NullStage(), problems=[]),
+    )
+    assert DEFAULT_TARGETS == [285000, 295000, 305000, 315000, 325000, 330000]
+
+    win = CalibrateWindow(auto_connect=False)
+    assert win.position_model.targets == DEFAULT_TARGETS
+    win._remove_position()
+    win._remove_position()
+    assert len(win.position_model.targets) == 4
+    win.close()
+    qapp.processEvents()
+
+    again = CalibrateWindow(auto_connect=False)
+    assert again.position_model.targets == DEFAULT_TARGETS
+    again.close()
+    qapp.processEvents()
+
+
+def test_stage_limits_are_shown_above_the_sweep(qapp, monkeypatch):
+    from fifa_gui.apps.calibrate.window import CalibrateWindow
+    from fifa_gui.hardware.base import NullCamera, NullStage
+    from fifa_gui.hardware.discovery import ProbeResult
+
+    monkeypatch.setattr(
+        "fifa_gui.apps.calibrate.worker.probe",
+        lambda **kwargs: ProbeResult(camera=NullCamera(), stage=NullStage(), problems=[]),
+    )
+    win = CalibrateWindow(auto_connect=False)
+    assert "not connected" in win.sweep_limits_label.text()
+
+    win._on_limits(LEFT, RIGHT)
+    qapp.processEvents()
+    text = win.sweep_limits_label.text()
+    assert f"{LEFT:,}" in text and f"{RIGHT:,}" in text
+    # The usable floor is the limit plus the back-off, which is the number that
+    # actually constrains a target.
+    from fifa_gui.core.sequence import DEFAULT_BACKOFF
+    assert f"{LEFT + DEFAULT_BACKOFF:,}" in text
+    win.close()
+    qapp.processEvents()
+
+
+def test_last_frame_scaling_does_not_wash_out_a_point_source(qapp, monkeypatch):
+    """The bug this guards: a 46 MP frame holding a handful of bright pixels.
+
+    autoscale_levels used the 99.5th percentile for the top of the range, but
+    the spot covers far less than 0.5% of the frame, so that percentile was
+    still background: hi - lo collapsed and the whole frame clipped to white.
+    """
+    import numpy as np
+
+    from fifa_gui.apps.calibrate.window import CalibrateWindow
+    from fifa_gui.hardware.base import NullCamera, NullStage
+    from fifa_gui.hardware.discovery import ProbeResult
+    from fifa_gui.qtutil.imageview import autoscale_levels, to_qimage
+
+    monkeypatch.setattr(
+        "fifa_gui.apps.calibrate.worker.probe",
+        lambda **kwargs: ProbeResult(camera=NullCamera(), stage=NullStage(), problems=[]),
+    )
+
+    rng = np.random.default_rng(0)
+    frame = (650 + rng.normal(0, 5, (706, 1036))).astype(np.uint16)
+    frame[350, 500] = 60000
+    frame[350, 501] = 20000
+
+    # The old behaviour, kept here to show why it was unusable.
+    old_lo, old_hi = autoscale_levels(frame)
+    washed = to_qimage(frame, old_lo, old_hi, log=True)._backing
+    assert washed.mean() > 200, "background should have flooded the display"
+
+    win = CalibrateWindow(auto_connect=False)
+    lo, hi = win._auto_levels_for(frame)
+    assert hi == 60000, "the top of the scale must be the brightest pixel"
+
+    shown = to_qimage(frame, lo, hi, log=True)._backing
+    assert shown.mean() < 120, "background must no longer flood the display"
+    assert shown[350, 500] > shown[350, 501] > shown[0, 0]
+
+    # Manual vmin/vmax must override, and survive a redraw with no new exposure.
+    win._last_preview = frame
+    win._last_meta = {"peak": 60000.0}
+    win.auto_levels.setChecked(False)
+    win.vmin.setValue(600)
+    win.vmax.setValue(1000)
+    win._redraw_last_frame()
+    assert win.vmin.value() == 600 and win.vmax.value() == 1000
+
+    win.auto_levels.setChecked(True)
+    win._redraw_last_frame()
+    assert win.vmax.value() == 60000, "Auto must recompute the range"
+
     win.close()
     qapp.processEvents()

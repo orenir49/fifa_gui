@@ -2,7 +2,6 @@
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
 from PySide6.QtGui import QBrush, QColor
-from PySide6.QtWidgets import QDialog, QDialogButtonBox, QFormLayout, QSpinBox
 
 COL_INDEX, COL_TARGET, COL_STATUS = range(3)
 HEADERS = ["#", "Target", "Status"]
@@ -137,30 +136,3 @@ class PositionTableModel(QAbstractTableModel):
         self.dataChanged.emit(index, index)
         return True
 
-
-class GenerateDialog(QDialog):
-    """start / stop / step, for a regular sweep."""
-
-    def __init__(self, parent=None, start=285000, stop=330000, step=10000, limits=None):
-        super().__init__(parent)
-        self.setWindowTitle("Generate positions")
-
-        low, high = limits or (-10_000_000, 10_000_000)
-        self.start = QSpinBox(); self.start.setRange(low, high); self.start.setValue(start)
-        self.stop = QSpinBox(); self.stop.setRange(low, high); self.stop.setValue(stop)
-        self.step = QSpinBox(); self.step.setRange(-1_000_000, 1_000_000); self.step.setValue(step)
-        for box in (self.start, self.stop, self.step):
-            box.setGroupSeparatorShown(True)
-
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-
-        form = QFormLayout(self)
-        form.addRow("Start", self.start)
-        form.addRow("Stop", self.stop)
-        form.addRow("Step", self.step)
-        form.addRow(buttons)
-
-    def values(self):
-        return self.start.value(), self.stop.value(), self.step.value()

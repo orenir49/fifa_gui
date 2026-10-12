@@ -35,10 +35,15 @@ class ZwoCamera(CameraBase):
         self._asi = init_asi(self.dll_path)
         if self._asi.get_num_cameras() == 0:
             raise NotAvailable(
-                "No ZWO camera detected.",
-                remedy=("Check the USB3 connection and that the ZWO ASI camera "
-                        "driver is installed (Device Manager should show an "
-                        "ASI Camera, not an unknown device)."),
+                "Unable to connect to the camera: none detected.",
+                remedy=(
+                    "Make sure ASIStudio, ASICap, SharpCap or a Python/Jupyter "
+                    "kernel is not already using the camera, then press "
+                    "Reconnect.\n\n"
+                    "Otherwise check the USB3 connection and that the ZWO ASI "
+                    "camera driver is installed (Device Manager should show an "
+                    "ASI Camera, not an unknown device)."
+                ),
             )
         self._cam = self._asi.Camera(self.index)
         self._props = self._cam.get_camera_property()
@@ -89,10 +94,10 @@ class ZwoCamera(CameraBase):
         image_type = getattr(asi, f"ASI_IMG_{settings.image_type}", asi.ASI_IMG_RAW16)
         self._cam.set_image_type(image_type)
         self._cam.set_control_value(asi.ASI_GAIN, int(settings.gain))
-        # The notebook never set exposure at all, so frames ran at whatever the
-        # SDK default happened to be -- which is how the archived mast00 and
-        # mast03 datasets ended up saturated.
-        self._cam.set_control_value(asi.ASI_EXPOSURE, int(settings.exposure_ms * 1000))
+        # ASI_EXPOSURE is in MICROseconds. The notebook never set it at all, so
+        # frames ran at whatever the SDK default happened to be -- which is how
+        # the archived mast00 and mast03 datasets ended up saturated.
+        self._cam.set_control_value(asi.ASI_EXPOSURE, int(settings.exposure_us))
 
         if self._props.get("IsCoolerCam"):
             self._cam.set_control_value(asi.ASI_COOLER_ON, 1 if settings.cooler_on else 0)
@@ -103,9 +108,34 @@ class ZwoCamera(CameraBase):
 
         return {
             "gain": self._cam.get_control_value(asi.ASI_GAIN)[0],
-            "exposure_ms": self._cam.get_control_value(asi.ASI_EXPOSURE)[0] / 1000.0,
+            "exposure_us": self._cam.get_control_value(asi.ASI_EXPOSURE)[0],
             "image_type": settings.image_type,
         }
+
+    def exposure_range_us(self):
+        """(min, max, default) for ASI_EXPOSURE, in microseconds.
+
+        Taken from the camera rather than hardcoded: the ASI294MM Pro's floor is
+        around 32 us, and that short end is the useful one for a bright fiber
+        spot. Returns None when the camera cannot be asked.
+        """
+        if not self.connected:
+            return None
+        try:
+            controls = self._cam.get_controls()
+            control = controls.get("Exposure")
+            if control is None:
+                control = next(
+                    (c for c in controls.values()
+                     if c.get("ControlType") == self._asi.ASI_EXPOSURE),
+                    None,
+                )
+            if control is not None:
+                return (int(control["MinValue"]), int(control["MaxValue"]),
+                        int(control["DefaultValue"]))
+        except Exception:
+            logger.exception("could not read the exposure range")
+        return None
 
     def temperature(self):
         if not self.connected or not self._props.get("IsCoolerCam"):

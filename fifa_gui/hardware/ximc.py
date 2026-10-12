@@ -71,10 +71,16 @@ class XimcStage(StageBase):
                 # The notebook printed "a virtual device will be used" here and
                 # then referenced an undefined device_uri.
                 raise NotAvailable(
-                    "No XIMC stage controller found.",
-                    remedy=("Check the USB connection and that the XIMC driver is "
-                            "installed, or type the URI manually "
-                            r"(for example xi-com:\\.\COM5)."),
+                    "Unable to connect to the stage: no controller found.",
+                    remedy=(
+                        "Make sure XILab or a Python/Jupyter kernel is not "
+                        "already using the stage, then press Reconnect. A "
+                        "notebook that ran open_device() holds the COM port "
+                        "until its kernel is restarted.\n\n"
+                        "Otherwise check the USB connection and the XIMC "
+                        "driver, or type the URI manually "
+                        r"(for example xi-com:\\.\COM5)."
+                    ),
                 )
             uri = found[0]
 
@@ -82,7 +88,16 @@ class XimcStage(StageBase):
         try:
             axis.open_device()
         except Exception as exc:
-            raise DeviceError(f"could not open {uri}: {exc}") from exc
+            raise NotAvailable(
+                f"Unable to connect to the stage at {uri}.",
+                remedy=(
+                    "Make sure XILab or a Python/Jupyter kernel is not already "
+                    "using the stage, then press Reconnect. A notebook that ran "
+                    "open_device() holds the COM port until its kernel is "
+                    "restarted.\n\n"
+                    f"The driver reported: {exc}"
+                ),
+            ) from exc
 
         self._axis = axis
         self.uri = uri

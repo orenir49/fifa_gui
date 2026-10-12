@@ -87,3 +87,25 @@ def dataset_saturated(synthetic_root):
 @pytest.fixture(scope="session")
 def dataset_flex(synthetic_root):
     return write_dataset(str(synthetic_root / "runFlex"), positions=[324998], repeats=5)
+
+
+@pytest.fixture(autouse=True)
+def isolated_qsettings(tmp_path):
+    """Keep the tests out of the developer's real QSettings store.
+
+    Without this the Calibrate window restores whatever position list and
+    camera settings happen to be saved on this machine, so a test asserting on
+    the defaults fails depending on what was last done in the real app -- and
+    worse, the tests overwrite those saved settings.
+    """
+    try:
+        from PySide6.QtCore import QSettings
+    except ImportError:          # core-only test runs need no Qt
+        yield
+        return
+
+    QSettings.setDefaultFormat(QSettings.IniFormat)
+    QSettings.setPath(
+        QSettings.IniFormat, QSettings.UserScope, str(tmp_path / "qsettings")
+    )
+    yield

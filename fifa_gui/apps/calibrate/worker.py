@@ -82,6 +82,7 @@ class _SaveTask(QRunnable):
 
 class AcquisitionWorker(QObject):
     hardware_changed = Signal(object, object, list)   # camera info, stage info, problems
+    exposure_range = Signal(object)                  # (min_us, max_us, default_us) or None
     position_changed = Signal(int)
     limits_changed = Signal(int, int)
     temperature = Signal(object, object)
@@ -208,6 +209,13 @@ class AcquisitionWorker(QObject):
             self.log.emit(logging.INFO, f"stage {stage_info.uri}, limits {left} .. {right}")
         if self._camera.connected:
             self.log.emit(logging.INFO, f"camera {camera_info.name} ({camera_info.detail})")
+            rng = getattr(self._camera, "exposure_range_us", lambda: None)()
+            self.exposure_range.emit(rng)
+            if rng:
+                self.log.emit(
+                    logging.INFO,
+                    f"exposure range {rng[0]:,} .. {rng[1]:,} us (default {rng[2]:,})",
+                )
         for device, message, _ in result.problems:
             self.log.emit(logging.WARNING, f"{device}: {message}")
 
@@ -283,7 +291,7 @@ class AcquisitionWorker(QObject):
     def _test_exposure(self, settings):
         self._camera.configure(settings)
         self.log.emit(logging.INFO, "test exposure ...")
-        image = self._expose(max(settings.exposure_ms / 1000.0 * 4 + 30, 30))
+        image = self._expose(max(settings.exposure_s * 4 + 30, 30))
         meta = self._frame_metadata(image)
         self.frame_ready.emit(decimate(image, PREVIEW_DECIMATION), meta)
         self.log.emit(
@@ -315,6 +323,19 @@ class AcquisitionWorker(QObject):
             record["camera_applied"] = applied
             self.state_changed.emit(STATE_RUNNING, {})
 
+            # Always home first, so every run starts from the same datum and the
+            # positions in the file names mean the same thing across runs.
+            self._check_abort()
+            self.frame_progress.emit(0, self._total, "homing")
+            self.log.emit(logging.INFO, "homing before the sequence ...")
+            self._stage.home_zero()
+            self._wait_for_stop()
+            homed_at = self._stage.position()
+            self.position_changed.emit(homed_at)
+            self.log.emit(logging.INFO, f"homed, position {homed_at}")
+            record["homed_before_sequence"] = True
+            record["position_after_home"] = homed_at
+
             for target in plan.targets:
                 self._check_abort()
 
@@ -335,7 +356,7 @@ class AcquisitionWorker(QObject):
                     self._check_abort()
                     self._index += 1
                     self.frame_progress.emit(self._index, self._total, "exposing")
-                    image = self._expose(max(plan.camera.exposure_ms / 1000.0 * 4 + 60, 60))
+                    image = self._expose(max(plan.camera.exposure_s * 4 + 60, 60))
 
                     meta = self._frame_metadata(image, achieved)
                     name = plan.filename(achieved, k)

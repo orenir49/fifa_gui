@@ -32,14 +32,25 @@ def autoscale_levels(arr, lo_pct=1.0, hi_pct=99.5):
     return float(lo), float(hi)
 
 
-def to_qimage(arr, lo, hi):
+def to_qimage(arr, lo, hi, log=False):
     """Map a 2-D array to an 8-bit grayscale QImage.
+
+    With log=True the stretch is logarithmic, which is what makes a faint halo
+    visible next to a near-saturated core -- the usual state of the fiber spot.
 
     QImage does not copy its buffer, so the backing array is kept alive on the
     returned object -- otherwise the view shows garbage or crashes.
     """
-    scale = 255.0 / max(hi - lo, 1e-9)
-    u8 = np.clip((arr.astype(np.float32) - lo) * scale, 0, 255).astype(np.uint8)
+    data = arr.astype(np.float32)
+    if log:
+        span = max(hi - lo, 1e-9)
+        norm = np.clip((data - lo) / span, 0.0, 1.0)
+        # log1p over a decent dynamic range, normalised back to 0..1
+        gain = 1000.0
+        u8 = (np.log1p(norm * gain) / np.log1p(gain) * 255.0).astype(np.uint8)
+    else:
+        scale = 255.0 / max(hi - lo, 1e-9)
+        u8 = np.clip((data - lo) * scale, 0, 255).astype(np.uint8)
     u8 = np.ascontiguousarray(u8)
     h, w = u8.shape
     img = QImage(u8.data, w, h, w, QImage.Format_Grayscale8)
@@ -71,7 +82,7 @@ class ImageView(QGraphicsView):
 
     # ------------------------------------------------------------------ frame
 
-    def set_frame(self, arr, factor=1, levels=None):
+    def set_frame(self, arr, factor=1, levels=None, log=False):
         """Show `arr`, which is the full frame decimated by `factor`."""
         self._scene.clear()
         self._overlays = []
@@ -81,7 +92,7 @@ class ImageView(QGraphicsView):
             return
 
         lo, hi = levels if levels is not None else autoscale_levels(arr)
-        pix = QPixmap.fromImage(to_qimage(arr, lo, hi))
+        pix = QPixmap.fromImage(to_qimage(arr, lo, hi, log=log))
         self._pixmap_item = QGraphicsPixmapItem(pix)
         # Scale the decimated pixmap back up, so scene units are full-res pixels.
         self._pixmap_item.setTransform(QTransform.fromScale(factor, factor))

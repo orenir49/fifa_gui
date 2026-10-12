@@ -6,7 +6,7 @@ import os
 
 import numpy as np
 from PySide6.QtCore import QSettings, Qt, QThread, Slot
-from PySide6.QtGui import QAction, QKeySequence
+from PySide6.QtGui import QAction, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame,
     QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow,
@@ -16,14 +16,14 @@ from PySide6.QtWidgets import (
 
 from fifa_gui import __version__
 from fifa_gui.apps.calibrate import commands
-from fifa_gui.apps.calibrate.positiontable import GenerateDialog, PositionTableModel
+from fifa_gui.apps.calibrate.positiontable import PositionTableModel
 from fifa_gui.apps.calibrate.worker import (
     STATE_ABORTED, STATE_DONE, STATE_FAILED, STATE_IDLE, STATE_RUNNING,
     STATE_WAITING_OPERATOR, AcquisitionWorker,
 )
 from fifa_gui.core.sequence import (
-    DEFAULT_BACKOFF, DEFAULT_SETTLE_MS, CameraSettings, SequencePlan,
-    generate_targets, validate,
+    DEFAULT_BACKOFF, DEFAULT_EXPOSURE_US, DEFAULT_REPEATS, DEFAULT_SETTLE_MS,
+    CameraSettings, SequencePlan, validate,
 )
 from fifa_gui.qtutil.imageview import COLOR_CENTROID, ImageView
 from fifa_gui.qtutil.logpanel import LogPanel
@@ -37,9 +37,21 @@ BANNER_STYLE = (
     "QLabel { color: #fee2e2; font-weight: bold; }"
 )
 PAUSE_STYLE = (
-    "QFrame { background: #78350f; border: 1px solid #f59e0b; border-radius: 4px; }"
-    "QLabel { color: #fef3c7; font-weight: bold; font-size: 11pt; }"
+    "QFrame { background: #7f1d1d; border: 3px solid #ef4444; border-radius: 6px; }"
+    "QLabel { color: #fecaca; font-weight: bold; font-size: 20pt; }"
 )
+
+#: The operator is at the bench, not the screen, so the pause has to shout.
+CONTINUE_WAITING_STYLE = (
+    "QPushButton { background: #dc2626; color: white; font-size: 20pt;"
+    " font-weight: bold; border: 3px solid #fca5a5; border-radius: 6px; }"
+    "QPushButton:hover { background: #ef4444; }"
+)
+CONTINUE_IDLE_STYLE = ""
+
+#: Shown while the sequence is paused. Mentions the ND filter because forgetting
+#: to put it back is what saturates the frame.
+PAUSE_PROMPT = "CENTER FIBER, RETURN ND FILTER, THEN PRESS CONTINUE"
 
 
 class CalibrateWindow(QMainWindow):
@@ -214,14 +226,24 @@ class CalibrateWindow(QMainWindow):
         self.camera_label.setWordWrap(True)
 
         self.gain = QSpinBox(); self.gain.setRange(0, 600); self.gain.setValue(120)
+
+        # Microseconds, which is the unit ASI_EXPOSURE takes. The useful end for
+        # a bright fiber spot is the short one -- around 32 us -- so a spin box
+        # that bottomed out at 1 ms could not reach a usable exposure at all.
+        # The real range is read from the camera on connect.
         self.exposure = QSpinBox()
-        self.exposure.setRange(1, 600_000)
-        self.exposure.setValue(100)
-        self.exposure.setSuffix(" ms")
+        self.exposure.setRange(1, 2_000_000_000)
+        self.exposure.setValue(DEFAULT_EXPOSURE_US)
+        self.exposure.setSuffix(" us")
+        self.exposure.setGroupSeparatorShown(True)
         self.exposure.setToolTip(
-            "The notebook never set this, so frames ran at whatever the SDK\n"
-            "default was -- which is how the archived datasets came out saturated."
+            "Exposure in microseconds. The notebook never set this at all, so\n"
+            "frames ran at whatever the SDK default was -- which is how the\n"
+            "archived datasets came out saturated."
         )
+        self.exposure.valueChanged.connect(self._update_exposure_hint)
+        self.exposure_hint = QLabel()
+        self.exposure_hint.setStyleSheet("color: grey;")
         self.image_type = QComboBox()
         self.image_type.addItems(["RAW16", "RAW8"])
 
@@ -235,6 +257,7 @@ class CalibrateWindow(QMainWindow):
         form = QFormLayout()
         form.addRow("Gain", self.gain)
         form.addRow("Exposure", self.exposure)
+        form.addRow("", self.exposure_hint)
         form.addRow("Image type", self.image_type)
         form.addRow("", self.cooler)
         form.addRow("Target temp", self.target_temp)
@@ -271,33 +294,18 @@ class CalibrateWindow(QMainWindow):
         dir_row.addWidget(self.out_dir, 1)
         dir_row.addWidget(browse)
 
-        self.backoff = QSpinBox()
-        self.backoff.setRange(0, 10_000_000)
-        self.backoff.setValue(DEFAULT_BACKOFF)
-        self.backoff.setGroupSeparatorShown(True)
-        self.backoff.setToolTip("How far to retract so the obscuration clears the beam")
-        self.backoff.valueChanged.connect(lambda _: self._revalidate())
+        # Back-off, settle, repeats and the operator pause are fixed: they are
+        # properties of the bench, not of a run, and getting one of them wrong
+        # silently costs a whole sweep.
+        fixed = QLabel(
+            f"Back-off {DEFAULT_BACKOFF:,} | settle {DEFAULT_SETTLE_MS} ms | "
+            f"{DEFAULT_REPEATS} frame per position | pauses at every position"
+        )
+        fixed.setStyleSheet("color: grey;")
+        fixed.setWordWrap(True)
 
-        self.settle = QSpinBox()
-        self.settle.setRange(0, 60_000)
-        self.settle.setValue(DEFAULT_SETTLE_MS)
-        self.settle.setSuffix(" ms")
-
-        self.repeats = QSpinBox()
-        self.repeats.setRange(1, 100)
-        self.repeats.setValue(1)
-        self.repeats.setToolTip("Frames per position; >1 names them <position>_<k>.npy")
-        self.repeats.valueChanged.connect(lambda _: self._revalidate())
-
-        self.pause_check = QCheckBox("Pause at each position to recentre the spot")
-        self.pause_check.setChecked(True)
         self.overwrite_check = QCheckBox("Allow overwriting existing frames")
         self.overwrite_check.toggled.connect(lambda _: self._revalidate())
-
-        form = QFormLayout()
-        form.addRow("Back-off", self.backoff)
-        form.addRow("Settle", self.settle)
-        form.addRow("Repeats", self.repeats)
 
         self.position_model = PositionTableModel(DEFAULT_TARGETS, self)
         self.position_model.dataChanged.connect(lambda *_: self._revalidate())
@@ -308,16 +316,38 @@ class CalibrateWindow(QMainWindow):
         self.position_view.verticalHeader().setVisible(False)
         self.position_view.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.position_view.setMaximumHeight(200)
+        # Without SelectRows, clicking a cell selects only that cell and
+        # selectedRows() comes back empty -- which made +/-/^/v silently do
+        # nothing. ExtendedSelection lets several rows be removed at once.
+        self.position_view.setSelectionBehavior(QTableView.SelectRows)
+        self.position_view.setSelectionMode(QTableView.ExtendedSelection)
+        self.position_view.setEditTriggers(
+            QTableView.DoubleClicked | QTableView.SelectedClicked | QTableView.EditKeyPressed
+        )
 
-        add = QPushButton("+"); add.setFixedWidth(30); add.clicked.connect(self._add_position)
-        remove = QPushButton("-"); remove.setFixedWidth(30); remove.clicked.connect(self._remove_position)
+        add = QPushButton("+")
+        add.setFixedWidth(30)
+        add.setToolTip("Add a position below the selected row (Insert)")
+        add.clicked.connect(self._add_position)
+        remove = QPushButton("-")
+        remove.setFixedWidth(30)
+        remove.setToolTip("Remove the selected rows, or the last one (Delete)")
+        remove.clicked.connect(self._remove_position)
         up = QPushButton("^"); up.setFixedWidth(30); up.clicked.connect(lambda: self._move_position(-1))
         down = QPushButton("v"); down.setFixedWidth(30); down.clicked.connect(lambda: self._move_position(1))
-        gen = QPushButton("Generate..."); gen.clicked.connect(self._generate_positions)
+        clear = QPushButton("Clear"); clear.clicked.connect(self._clear_positions)
         table_buttons = QHBoxLayout()
-        for widget in (add, remove, up, down, gen):
+        for widget in (add, remove, up, down, clear):
             table_buttons.addWidget(widget)
         table_buttons.addStretch(1)
+
+        QShortcut(QKeySequence(Qt.Key_Delete), self.position_view,
+                  activated=self._remove_position)
+        QShortcut(QKeySequence(Qt.Key_Insert), self.position_view,
+                  activated=self._add_position)
+
+        self.count_label = QLabel()
+        self.count_label.setStyleSheet("color: grey;")
 
         self.validation_label = QLabel()
         self.validation_label.setWordWrap(True)
@@ -338,12 +368,15 @@ class CalibrateWindow(QMainWindow):
 
         layout.addWidget(QLabel("Output directory"))
         layout.addLayout(dir_row)
-        layout.addLayout(form)
-        layout.addWidget(self.pause_check)
+        layout.addWidget(fixed)
         layout.addWidget(self.overwrite_check)
+        self.sweep_limits_label = QLabel("Stage limits: not connected")
+        self.sweep_limits_label.setStyleSheet("font-weight: bold;")
         layout.addWidget(QLabel("Positions"))
+        layout.addWidget(self.sweep_limits_label)
         layout.addWidget(self.position_view)
         layout.addLayout(table_buttons)
+        layout.addWidget(self.count_label)
         layout.addWidget(self.validation_label)
         layout.addLayout(run_buttons)
         return box
@@ -354,9 +387,98 @@ class CalibrateWindow(QMainWindow):
         self.view = ImageView()
         self.frame_label = QLabel("No frame yet. Use 'Test exposure' or start a sequence.")
         self.frame_label.setWordWrap(True)
+
+        self._last_preview = None     # kept so rescaling needs no new exposure
+        self._last_meta = None
+
+        self.auto_levels = QCheckBox("Auto")
+        self.auto_levels.setChecked(True)
+        self.auto_levels.setToolTip(
+            "Scale from the background up to the brightest pixel.\n"
+            "Untick to set vmin and vmax by hand."
+        )
+        self.auto_levels.toggled.connect(self._on_auto_levels_toggled)
+
+        self.vmin = QSpinBox()
+        self.vmin.setRange(0, 65535)
+        self.vmin.setGroupSeparatorShown(True)
+        self.vmin.setEnabled(False)
+        self.vmin.valueChanged.connect(self._redraw_last_frame)
+
+        self.vmax = QSpinBox()
+        self.vmax.setRange(1, 65535)
+        self.vmax.setValue(65535)
+        self.vmax.setGroupSeparatorShown(True)
+        self.vmax.setEnabled(False)
+        self.vmax.valueChanged.connect(self._redraw_last_frame)
+
+        self.log_levels = QCheckBox("Log")
+        self.log_levels.setChecked(True)
+        self.log_levels.setToolTip(
+            "Logarithmic stretch, so the faint halo is visible next to a core\n"
+            "that is near full well."
+        )
+        self.log_levels.toggled.connect(self._redraw_last_frame)
+
+        levels = QHBoxLayout()
+        levels.addWidget(QLabel("Scale:"))
+        levels.addWidget(self.auto_levels)
+        levels.addWidget(QLabel("vmin"))
+        levels.addWidget(self.vmin)
+        levels.addWidget(QLabel("vmax"))
+        levels.addWidget(self.vmax)
+        levels.addWidget(self.log_levels)
+        levels.addStretch(1)
+
         layout.addWidget(self.view, 1)
+        layout.addLayout(levels)
         layout.addWidget(self.frame_label)
         return box
+
+    def _on_auto_levels_toggled(self, on):
+        self.vmin.setEnabled(not on)
+        self.vmax.setEnabled(not on)
+        self._redraw_last_frame()
+
+    def _auto_levels_for(self, arr):
+        """Background floor up to the brightest pixel.
+
+        Not a high percentile: the spot covers a handful of pixels out of 46
+        million, so even the 99.5th percentile is still background and the
+        whole frame clips to white.
+        """
+        lo = float(np.percentile(arr, 50.0))
+        hi = float(arr.max())
+        if hi <= lo:
+            hi = lo + 1.0
+        return lo, hi
+
+    def _redraw_last_frame(self, *_):
+        if self._last_preview is None:
+            return
+        if self.auto_levels.isChecked():
+            lo, hi = self._auto_levels_for(self._last_preview)
+            self.vmin.blockSignals(True); self.vmax.blockSignals(True)
+            self.vmin.setValue(int(lo))
+            self.vmax.setValue(max(int(hi), 1))
+            self.vmin.blockSignals(False); self.vmax.blockSignals(False)
+        else:
+            lo, hi = float(self.vmin.value()), float(self.vmax.value())
+            if hi <= lo:
+                hi = lo + 1.0
+        self.view.set_frame(
+            self._last_preview, factor=8, levels=(lo, hi),
+            log=self.log_levels.isChecked(),
+        )
+        meta = self._last_meta
+        if meta and np.isfinite(meta.get("peak", float("nan"))):
+            try:
+                row, col = np.unravel_index(
+                    int(np.argmax(self._last_preview)), self._last_preview.shape
+                )
+                self.view.add_marker(row * 8, col * 8, COLOR_CENTROID)
+            except Exception:
+                pass
 
     def _build_progress_box(self):
         widget = QWidget()
@@ -385,6 +507,7 @@ class CalibrateWindow(QMainWindow):
         self.thread.started.connect(self.worker.run)
 
         self.worker.hardware_changed.connect(self._on_hardware_changed)
+        self.worker.exposure_range.connect(self._on_exposure_range)
         self.worker.position_changed.connect(self._on_position)
         self.worker.limits_changed.connect(self._on_limits)
         self.worker.temperature.connect(self._on_temperature)
@@ -430,15 +553,42 @@ class CalibrateWindow(QMainWindow):
         if stage_info is None:
             missing.append("stage")
         if missing:
+            what = " and ".join(missing)
             self.banner_label.setText(
-                "No " + " and no ".join(missing)
-                + " detected - acquisition is disabled."
+                f"Unable to connect to the {what}. Make sure ASIStudio / XILab / "
+                f"a Python or Jupyter kernel is not using the {what}, then press "
+                f"Reconnect.  (Details for more.)"
             )
             self.banner.setVisible(True)
         else:
             self.banner.setVisible(False)
         self._update_enabled()
         self._revalidate()
+
+    def _update_exposure_hint(self, *_):
+        us = self.exposure.value()
+        if us >= 1_000_000:
+            self.exposure_hint.setText(f"= {us / 1e6:.3f} s")
+        else:
+            self.exposure_hint.setText(f"= {us / 1000.0:.3f} ms")
+
+    @Slot(object)
+    def _on_exposure_range(self, rng):
+        """Clamp the spin box to what this camera actually accepts."""
+        if not rng:
+            self._update_exposure_hint()
+            return
+        lo, hi, default = rng
+        self.exposure.setRange(int(lo), int(hi))
+        self.exposure.setToolTip(
+            f"Exposure in microseconds.\n"
+            f"This camera accepts {lo:,} .. {hi:,} us (default {default:,})."
+        )
+        if self.exposure.value() < lo:
+            self.exposure.setValue(int(lo))
+        self.exposure_hint.setText(
+            f"= {self.exposure.value() / 1000.0:.3f} ms   (camera min {lo:,} us)"
+        )
 
     @Slot(int)
     def _on_position(self, position):
@@ -448,6 +598,7 @@ class CalibrateWindow(QMainWindow):
     def _on_limits(self, left, right):
         self._limits = (left, right)
         self.limits_label.setText(f"limits: {left:,} .. {right:,}")
+        self._update_sweep_limits()
         self.goto_spin.setRange(left, right)
         self.position_model.set_limits(self._limits)
         self._revalidate()
@@ -466,16 +617,27 @@ class CalibrateWindow(QMainWindow):
 
         if state == STATE_WAITING_OPERATOR:
             position = payload.get("position")
-            self.pause_label.setText(
-                f"Recentre the spot on the fiber, then press CONTINUE.   "
-                f"(stage at {position:,})"
-            )
+            self.pause_label.setText(f"{PAUSE_PROMPT}\n(stage at {position:,})")
             self.pause_banner.setVisible(True)
-            # The operator is looking at the bench, not the screen.
+            self.continue_btn.setStyleSheet(CONTINUE_WAITING_STYLE)
+            self.continue_btn.setMinimumHeight(80)
+            self.continue_btn.setText("CONTINUE")
+            self.continue_btn.setDefault(True)
+            # Bring the window to the front: the operator is at the bench and
+            # will not see a banner on a window that is behind everything else.
+            self.setWindowState(
+                (self.windowState() & ~Qt.WindowMinimized) | Qt.WindowActive
+            )
+            self.raise_()
+            self.activateWindow()
+            self.continue_btn.setFocus()
             QApplication.beep()
             QApplication.alert(self)
         else:
             self.pause_banner.setVisible(False)
+            self.continue_btn.setStyleSheet(CONTINUE_IDLE_STYLE)
+            self.continue_btn.setMinimumHeight(38)
+            self.continue_btn.setDefault(False)
 
         if state in (STATE_DONE, STATE_ABORTED, STATE_FAILED):
             self.position_model.reset_status()
@@ -491,12 +653,9 @@ class CalibrateWindow(QMainWindow):
 
     @Slot(object, dict)
     def _on_frame(self, preview, meta):
-        self.view.set_frame(preview, factor=8)
-        try:
-            row, col = np.unravel_index(int(np.argmax(preview)), preview.shape)
-            self.view.add_marker(row * 8, col * 8, COLOR_CENTROID)
-        except Exception:
-            pass
+        self._last_preview = preview
+        self._last_meta = meta
+        self._redraw_last_frame()
         saturated = "  SATURATED" if meta["saturated"] else ""
         position = meta.get("position")
         where = f"stage {position:,}   " if position is not None else ""
@@ -522,7 +681,7 @@ class CalibrateWindow(QMainWindow):
     def _camera_settings(self):
         return CameraSettings(
             gain=self.gain.value(),
-            exposure_ms=self.exposure.value(),
+            exposure_us=self.exposure.value(),
             image_type=self.image_type.currentText(),
             cooler_on=self.cooler.isChecked(),
             target_temp_c=self.target_temp.value(),
@@ -532,16 +691,35 @@ class CalibrateWindow(QMainWindow):
         return SequencePlan(
             targets=self.position_model.targets,
             out_dir=self.out_dir.text().strip(),
-            backoff=self.backoff.value(),
-            settle_ms=self.settle.value(),
-            repeats=self.repeats.value(),
+            backoff=DEFAULT_BACKOFF,
+            settle_ms=DEFAULT_SETTLE_MS,
+            repeats=DEFAULT_REPEATS,
             overwrite=self.overwrite_check.isChecked(),
-            pause_for_operator=self.pause_check.isChecked(),
+            pause_for_operator=True,
             camera=self._camera_settings(),
         )
 
+    def _update_sweep_limits(self):
+        if not self._limits:
+            self.sweep_limits_label.setText("Stage limits: not connected")
+            return
+        left, right = self._limits
+        usable_low = left + DEFAULT_BACKOFF
+        self.sweep_limits_label.setText(
+            f"Stage limits: {left:,} .. {right:,}   |   "
+            f"usable here: {usable_low:,} .. {right:,} "
+            f"(back-off {DEFAULT_BACKOFF:,})"
+        )
+
     def _revalidate(self):
-        problems = validate(self._plan(), self._limits)
+        self._update_sweep_limits()
+        plan = self._plan()
+        n = len(plan.targets)
+        self.count_label.setText(
+            f"{n} position{'' if n == 1 else 's'}, {plan.frame_count} frame"
+            f"{'' if plan.frame_count == 1 else 's'}"
+        )
+        problems = validate(plan, self._limits)
         errors = [p.text for p in problems if p.level == "error"]
         warnings = [p.text for p in problems if p.level == "warning"]
 
@@ -618,44 +796,45 @@ class CalibrateWindow(QMainWindow):
             self.out_dir.setText(directory)
             self.settings.setValue("last_out_dir", directory)
 
+    def _selected_rows(self):
+        return sorted(i.row() for i in self.position_view.selectionModel().selectedRows())
+
     def _add_position(self):
-        rows = self.position_view.selectionModel().selectedRows()
-        after = rows[0].row() if rows else None
+        rows = self._selected_rows()
         targets = self.position_model.targets
-        value = targets[after] if after is not None and targets else (
-            targets[-1] if targets else 285000
-        )
+        after = rows[-1] if rows else None
+        if targets:
+            value = targets[after] if after is not None else targets[-1]
+        else:
+            # Somewhere inside the travel, so the back-off check can pass.
+            value = self._limits[0] + DEFAULT_BACKOFF if self._limits else 285000
         new_row = self.position_model.add(value, after)
         self.position_view.selectRow(new_row)
+        self.position_view.edit(self.position_model.index(new_row, 1))
 
     def _remove_position(self):
-        rows = self.position_view.selectionModel().selectedRows()
-        if rows:
-            self.position_model.remove(rows[0].row())
+        rows = self._selected_rows()
+        if not rows:
+            # Nothing selected: drop the last one, which is what "-" means to
+            # someone trimming a six-position default down to two.
+            if self.position_model.rowCount():
+                rows = [self.position_model.rowCount() - 1]
+            else:
+                return
+        for row in reversed(rows):
+            self.position_model.remove(row)
+        remaining = self.position_model.rowCount()
+        if remaining:
+            self.position_view.selectRow(min(rows[0], remaining - 1))
+
+    def _clear_positions(self):
+        self.position_model.set_targets([])
 
     def _move_position(self, delta):
-        rows = self.position_view.selectionModel().selectedRows()
+        rows = self._selected_rows()
         if rows:
-            self.position_view.selectRow(self.position_model.move(rows[0].row(), delta))
+            self.position_view.selectRow(self.position_model.move(rows[0], delta))
 
-    def _generate_positions(self):
-        targets = self.position_model.targets
-        dialog = GenerateDialog(
-            self,
-            start=targets[0] if targets else 285000,
-            stop=targets[-1] if targets else 330000,
-            step=10000,
-            limits=self._limits,
-        )
-        if dialog.exec() != dialog.DialogCode.Accepted:
-            return
-        start, stop, step = dialog.values()
-        try:
-            self.position_model.set_targets(generate_targets(start, stop, step))
-        except ValueError as exc:
-            QMessageBox.warning(self, "Cannot generate positions", str(exc))
-            return
-        self._revalidate()
 
     def locate_dll(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -713,13 +892,9 @@ class CalibrateWindow(QMainWindow):
     def _apply_plan(self, plan):
         self.position_model.set_targets(plan.targets)
         self.out_dir.setText(plan.out_dir)
-        self.backoff.setValue(plan.backoff)
-        self.settle.setValue(plan.settle_ms)
-        self.repeats.setValue(plan.repeats)
         self.overwrite_check.setChecked(plan.overwrite)
-        self.pause_check.setChecked(plan.pause_for_operator)
         self.gain.setValue(plan.camera.gain)
-        self.exposure.setValue(int(plan.camera.exposure_ms))
+        self.exposure.setValue(int(plan.camera.exposure_us))
         self.image_type.setCurrentText(plan.camera.image_type)
         self.cooler.setChecked(plan.camera.cooler_on)
         self.target_temp.setValue(plan.camera.target_temp_c)
@@ -733,33 +908,21 @@ class CalibrateWindow(QMainWindow):
         if geometry:
             self.restoreGeometry(geometry)
         self.out_dir.setText(s.value("out_dir", "", type=str))
-        self.backoff.setValue(int(s.value("backoff", DEFAULT_BACKOFF)))
-        self.settle.setValue(int(s.value("settle_ms", DEFAULT_SETTLE_MS)))
-        self.repeats.setValue(int(s.value("repeats", 1)))
         self.gain.setValue(int(s.value("gain", 120)))
-        self.exposure.setValue(int(s.value("exposure_ms", 100)))
-        self.pause_check.setChecked(s.value("pause_for_operator", True, type=bool))
+        self.exposure.setValue(int(s.value("exposure_us", DEFAULT_EXPOSURE_US)))
         self.stage_uri.setEditText(s.value("stage_uri", "", type=str))
-        targets = s.value("targets", "", type=str)
-        if targets:
-            try:
-                self.position_model.set_targets(json.loads(targets))
-            except ValueError:
-                pass
+        # The position list is deliberately NOT restored: every run starts
+        # from the standard sweep. Use File > Save/Load plan to keep a
+        # custom list.
         self._revalidate()
 
     def _save_settings(self):
         s = self.settings
         s.setValue("geometry", self.saveGeometry())
         s.setValue("out_dir", self.out_dir.text())
-        s.setValue("backoff", self.backoff.value())
-        s.setValue("settle_ms", self.settle.value())
-        s.setValue("repeats", self.repeats.value())
         s.setValue("gain", self.gain.value())
-        s.setValue("exposure_ms", self.exposure.value())
-        s.setValue("pause_for_operator", self.pause_check.isChecked())
+        s.setValue("exposure_us", self.exposure.value())
         s.setValue("stage_uri", self.stage_uri.currentText())
-        s.setValue("targets", json.dumps(self.position_model.targets))
 
     def _about(self):
         QMessageBox.about(

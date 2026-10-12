@@ -10,9 +10,13 @@ from dataclasses import dataclass, field, asdict
 
 #: distance to retract so the obscuration clears the beam, in stage steps
 DEFAULT_BACKOFF = 110000
-DEFAULT_SETTLE_MS = 100
+DEFAULT_SETTLE_MS = 99
+DEFAULT_REPEATS = 1
 DEFAULT_GAIN = 120
-DEFAULT_EXPOSURE_MS = 100
+#: Exposure is in MICROseconds, which is the unit ASI_EXPOSURE takes. The
+#: ASI294MM Pro goes down to ~32 us, and that short end is the useful one here:
+#: the fiber spot is bright enough that a millisecond saturates it.
+DEFAULT_EXPOSURE_US = 32
 
 #: a full-frame RAW16 ASI294MM Pro exposure, 5644 x 8288 x 2 bytes
 FRAME_BYTES = 5644 * 8288 * 2
@@ -21,10 +25,18 @@ FRAME_BYTES = 5644 * 8288 * 2
 @dataclass
 class CameraSettings:
     gain: int = DEFAULT_GAIN
-    exposure_ms: int = DEFAULT_EXPOSURE_MS
+    exposure_us: int = DEFAULT_EXPOSURE_US
     image_type: str = "RAW16"
     cooler_on: bool = False
     target_temp_c: int = -10
+
+    @property
+    def exposure_ms(self):
+        return self.exposure_us / 1000.0
+
+    @property
+    def exposure_s(self):
+        return self.exposure_us / 1e6
 
 
 @dataclass
@@ -33,7 +45,7 @@ class SequencePlan:
     out_dir: str = ""
     backoff: int = DEFAULT_BACKOFF
     settle_ms: int = DEFAULT_SETTLE_MS
-    repeats: int = 1
+    repeats: int = DEFAULT_REPEATS
     overwrite: bool = False
     #: pause at each position so the operator can recentre the spot, which is
     #: what the notebook's input() prompt did
@@ -60,7 +72,10 @@ class SequencePlan:
     @classmethod
     def from_dict(cls, d):
         d = dict(d)
-        cam = d.pop("camera", None) or {}
+        cam = dict(d.pop("camera", None) or {})
+        # Plans written before exposure moved to microseconds.
+        if "exposure_ms" in cam:
+            cam["exposure_us"] = int(round(float(cam.pop("exposure_ms")) * 1000))
         return cls(camera=CameraSettings(**cam), **d)
 
 

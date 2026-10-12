@@ -26,6 +26,7 @@ class FakeStage(StageBase):
         self.moves = []
         self.stopped = False
         self.closed = False
+        self.homed = 0
 
     def open(self):
         if self.fail_open:
@@ -69,7 +70,9 @@ class FakeStage(StageBase):
         self._moving_ticks = 0
 
     def home_zero(self):
+        self.homed += 1
         self._position = 0
+        self._moving_ticks = 1
 
 
 class FakeCamera(CameraBase):
@@ -101,7 +104,7 @@ class FakeCamera(CameraBase):
 
     def configure(self, settings):
         self.settings = settings
-        return {"gain": settings.gain, "exposure_ms": settings.exposure_ms,
+        return {"gain": settings.gain, "exposure_us": settings.exposure_us,
                 "image_type": settings.image_type}
 
     def capture(self, timeout_s=120.0, abort=None):
@@ -116,3 +119,6 @@ class FakeCamera(CameraBase):
 
     def temperature(self):
         return -10.0, 42.0
+
+    def exposure_range_us(self):
+        return (32, 2_000_000_000, 10_000)
