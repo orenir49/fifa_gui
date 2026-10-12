@@ -181,15 +181,16 @@ def test_flexure_tab_groups_repeats(window, qapp, dataset_flex):
 def test_flexure_circle_follows_the_diameter_field(window, qapp, dataset_flex):
     from fifa_gui.core.flexure import flexure_stats
 
+    from fifa_gui.apps.calculate.window import UM_PER_PX
+
     _load(window, qapp, dataset_flex)
-    window.um_per_px.setValue(2.35)
     window.flex_diameter.setValue(30.0)
     used = [r for r in window.datasets[0].records if r.usable]
     stats = flexure_stats(
         [r.effective_row for r in used], [r.effective_col for r in used],
-        um_per_px=2.35, diameter_um=30.0,
+        um_per_px=UM_PER_PX, diameter_um=30.0,
     )
-    assert stats.radius_px == pytest.approx(15.0 / 2.35)
+    assert stats.radius_px == pytest.approx(15.0 / UM_PER_PX)
 
 
 # ----------------------------------------------------------------- inverse
@@ -392,3 +393,29 @@ def test_there_is_no_log_panel(window, qapp):
     # The call sites still work, and land somewhere a person can see.
     window.log.append_line("hello from the test")
     assert "hello from the test" in window.statusBar().currentMessage()
+
+
+def test_the_reduction_parameters_are_fixed_in_code(window, qapp):
+    """They must not be editable: every archived dataset used these values."""
+    from fifa_gui.apps.calculate.window import (
+        BG_OFFSET, CLIP_NEGATIVE, HALF_WIDTH, STAGE_SPEC, UM_PER_PX,
+    )
+
+    # The notebook's values, which reproduce the archived fits.
+    assert (HALF_WIDTH, BG_OFFSET, CLIP_NEGATIVE) == (4, 100, True)
+    assert UM_PER_PX == 2.35
+    assert STAGE_SPEC == 300000
+
+    assert window._params() == {
+        "half_width": HALF_WIDTH,
+        "bg_offset": BG_OFFSET,
+        "clip_negative": CLIP_NEGATIVE,
+        "um_per_px": UM_PER_PX,
+        "stage_spec": STAGE_SPEC,
+        "x_target": window.x_target.value(),
+        "flex_diameter_um": window.flex_diameter.value(),
+    }
+
+    # No control survives for any of them.
+    for gone in ("half_width", "bg_offset", "clip_check", "um_per_px", "stage_spec"):
+        assert not hasattr(window, gone), f"{gone} still has a widget"

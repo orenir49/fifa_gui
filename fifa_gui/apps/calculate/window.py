@@ -49,8 +49,16 @@ class _StatusLog:
 
 #: the notebook's ZWO plate scale. The ASI294MM Pro reports 2.315 um pixels;
 #: 2.35 is kept as the default so results match what has already been recorded.
-DEFAULT_UM_PER_PX = 2.35
-DEFAULT_STAGE_SPEC = 300000
+#: Fixed reduction parameters, taken from the original calibration
+#: notebook. They are not adjustable: these are the values the archived
+#: lab/mast0X/1 datasets were reduced with, and with them mast03/1 gives
+#: x/y(300000) = 4569.71/2812.83 and mast04/1 gives 4395.82/2536.49.
+HALF_WIDTH = 4            # ROI half-size, int(5/2.35)*2 for a 5 um fiber
+BG_OFFSET = 100           # rows away from the spot for the background box
+CLIP_NEGATIVE = True      # a centre of mass with negative weights can
+                          # land outside the data entirely
+UM_PER_PX = 2.35          # the notebook's ZWO scale
+STAGE_SPEC = 300000       # where the fiber position is reported
 DEFAULT_X_TARGET = 4400
 REFIT_DEBOUNCE_MS = 150
 
@@ -309,53 +317,30 @@ class CalculateWindow(QMainWindow):
         self.inspector.activateWindow()
 
     def _build_params_box(self):
-        box = QGroupBox("Parameters")
+        """The reduction parameters, shown but not editable.
+
+        They are fixed in code at the notebook's values: every archived
+        mast0X/1 dataset was reduced with these, so a stray edit would quietly
+        make a new measurement incomparable with the ones already in the unit
+        table. Change them in one place, with a reason, or not at all.
+        """
+        box = QGroupBox("Parameters (fixed)")
         form = QFormLayout(box)
 
-        self.half_width = QSpinBox()
-        self.half_width.setRange(1, 200)
-        self.half_width.setValue(4)
-        self.half_width.setToolTip(
-            "ROI half-size in pixels. The notebook used 4 (from int(5/2.35)*2 for\n"
-            "a 5 um fiber). Changing this needs the frames re-read: press Reload."
-        )
+        def fixed(text):
+            label = QLabel(text)
+            label.setStyleSheet("font-family: Consolas, monospace;")
+            return label
 
-        self.bg_offset = QSpinBox()
-        self.bg_offset.setRange(1, 2000)
-        self.bg_offset.setValue(100)
-        self.bg_offset.setToolTip("Rows away from the spot for the background box.")
-
-        self.clip_check = QCheckBox("Clip negatives")
-        self.clip_check.setChecked(True)
-        self.clip_check.setToolTip(
-            "A centre of mass with negative weights can land outside the data."
-        )
-
-        self.um_per_px = QDoubleSpinBox()
-        self.um_per_px.setRange(0.01, 100.0)
-        self.um_per_px.setDecimals(3)
-        self.um_per_px.setValue(DEFAULT_UM_PER_PX)
-        self.um_per_px.setSuffix(" um/px")
-        self.um_per_px.setToolTip(
-            "The notebook used 2.35 for the ZWO; the ASI294MM Pro reports 2.315."
-        )
-        self.um_per_px.valueChanged.connect(lambda _: self._refresh_views())
-
-        self.stage_spec = QSpinBox()
-        self.stage_spec.setRange(-10_000_000, 10_000_000)
-        self.stage_spec.setValue(DEFAULT_STAGE_SPEC)
-        self.stage_spec.setToolTip("Stage position at which to report the fiber position.")
-        self.stage_spec.valueChanged.connect(lambda _: self._refresh_views())
-
-        form.addRow("ROI half-width", self.half_width)
-        form.addRow("Background offset", self.bg_offset)
-        form.addRow("", self.clip_check)
-        form.addRow("Pixel scale", self.um_per_px)
-        form.addRow("Stage spec", self.stage_spec)
+        form.addRow("ROI half-width", fixed(f"{HALF_WIDTH} px"))
+        form.addRow("Background offset", fixed(f"{BG_OFFSET} rows"))
+        form.addRow("Clip negatives", fixed("yes" if CLIP_NEGATIVE else "no"))
+        form.addRow("Pixel scale", fixed(f"{UM_PER_PX:g} um/px"))
+        form.addRow("Stage spec", fixed(f"{STAGE_SPEC:,}"))
         return box
 
     def _build_result_box(self):
-        box = QGroupBox("Fit at the stage spec")
+        box = QGroupBox(f"Fit at stage {STAGE_SPEC:,}")
         layout = QVBoxLayout(box)
         self.result_label = QLabel("No fit yet.")
         self.result_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -445,7 +430,7 @@ class CalculateWindow(QMainWindow):
 
     def _on_interp_mode(self, *_):
         from_x = self.interp_mode.currentIndex() == 0
-        self.interp_value.setValue(DEFAULT_X_TARGET if from_x else DEFAULT_STAGE_SPEC)
+        self.interp_value.setValue(DEFAULT_X_TARGET if from_x else STAGE_SPEC)
         self.interp_value.setPrefix("x = " if from_x else "stage = ")
         self.interp_value.setDecimals(2 if from_x else 0)
         self._refresh_units()
@@ -524,11 +509,11 @@ class CalculateWindow(QMainWindow):
 
     def _params(self):
         return {
-            "half_width": self.half_width.value(),
-            "bg_offset": self.bg_offset.value(),
-            "clip_negative": self.clip_check.isChecked(),
-            "um_per_px": self.um_per_px.value(),
-            "stage_spec": self.stage_spec.value(),
+            "half_width": HALF_WIDTH,
+            "bg_offset": BG_OFFSET,
+            "clip_negative": CLIP_NEGATIVE,
+            "um_per_px": UM_PER_PX,
+            "stage_spec": STAGE_SPEC,
             "x_target": self.x_target.value(),
             "flex_diameter_um": self.flex_diameter.value(),
         }
@@ -538,11 +523,7 @@ class CalculateWindow(QMainWindow):
         geometry = s.value("geometry")
         if geometry:
             self.restoreGeometry(geometry)
-        self.half_width.setValue(int(s.value("half_width", 4)))
-        self.bg_offset.setValue(int(s.value("bg_offset", 100)))
-        self.clip_check.setChecked(s.value("clip_negative", True, type=bool))
-        self.um_per_px.setValue(float(s.value("um_per_px", DEFAULT_UM_PER_PX)))
-        self.stage_spec.setValue(int(s.value("stage_spec", DEFAULT_STAGE_SPEC)))
+        # The reduction parameters are fixed in code; nothing to restore.
         self.x_target.setValue(float(s.value("x_target", DEFAULT_X_TARGET)))
         self.flex_diameter.setValue(float(s.value("flex_diameter", DEFAULT_DIAMETER_UM)))
 
@@ -550,11 +531,6 @@ class CalculateWindow(QMainWindow):
         s = self.settings
         s.setValue("geometry", self.saveGeometry())
         for key, value in (
-            ("half_width", self.half_width.value()),
-            ("bg_offset", self.bg_offset.value()),
-            ("clip_negative", self.clip_check.isChecked()),
-            ("um_per_px", self.um_per_px.value()),
-            ("stage_spec", self.stage_spec.value()),
             ("x_target", self.x_target.value()),
             ("flex_diameter", self.flex_diameter.value()),
         ):
@@ -697,8 +673,8 @@ class CalculateWindow(QMainWindow):
             return
 
         fit = dataset.fit
-        spec = self.stage_spec.value()
-        scale = self.um_per_px.value()
+        spec = STAGE_SPEC
+        scale = UM_PER_PX
         self.result_label.setText(
             f"<b>{dataset.name}</b> at stage {spec}<br>"
             f"x (column) = {fit.x_at(spec):.2f} &plusmn; {fit.sigma_x_at(spec):.2f} px<br>"
@@ -731,7 +707,7 @@ class CalculateWindow(QMainWindow):
                     np.polyval(dataset.fit.coef_y, w),
                     ls="--", lw=1, color=line.get_facecolor()[0],
                 )
-                spec = self.stage_spec.value()
+                spec = STAGE_SPEC
                 ax.plot(
                     dataset.fit.x_at(spec), dataset.fit.y_at(spec),
                     marker="x", ms=10, mew=2, ls="none",
@@ -751,7 +727,7 @@ class CalculateWindow(QMainWindow):
         ax.set_ylabel("residual (px)")
         ax.set_title("Perpendicular residual")
         ax.axhline(0, color="k", ls="--", lw=1)
-        ax.axvline(self.stage_spec.value(), color="r", ls="--", lw=1)
+        ax.axvline(STAGE_SPEC, color="r", ls="--", lw=1)
 
         any_data = False
         for dataset in self.datasets:
@@ -796,7 +772,7 @@ class CalculateWindow(QMainWindow):
     def _refresh_flexure(self):
         dataset = self._current_dataset()
         ax = self.flex_plot.clear()
-        scale = self.um_per_px.value()
+        scale = UM_PER_PX
 
         if dataset is None or not dataset.records:
             ax.text(0.5, 0.5, "No dataset selected", ha="center", va="center",
@@ -903,7 +879,7 @@ class CalculateWindow(QMainWindow):
         self.view.set_frame(record.thumb[factor], factor=factor)
         self._draw_overlays(record)
 
-        scale = self.um_per_px.value()
+        scale = UM_PER_PX
         resid = (f"{record.residual:+.2f} px ({record.residual * scale:+.2f} um)"
                  if np.isfinite(record.residual) else "-")
         flags = " ".join(record.all_flags) or "none"
@@ -955,15 +931,15 @@ class CalculateWindow(QMainWindow):
         if record is None:
             return
 
-        half = max(self.half_width.value() * 6, 64)
+        half = max(HALF_WIDTH * 6, 64)
         r0, c0 = int(row) - half, int(col) - half
         try:
             window = read_window(record.path, r0, r0 + 2 * half, c0, c0 + 2 * half)
             local = find_centroid(
                 window,
-                half_width=self.half_width.value(),
-                bg_offset=min(self.bg_offset.value(), half),
-                clip_negative=self.clip_check.isChecked(),
+                half_width=HALF_WIDTH,
+                bg_offset=min(BG_OFFSET, half),
+                clip_negative=CLIP_NEGATIVE,
                 seed=(row - max(r0, 0), col - max(c0, 0)),
             )
         except Exception as exc:
@@ -1067,11 +1043,22 @@ class CalculateWindow(QMainWindow):
             return
 
         params = payload.get("parameters", {})
-        self.half_width.setValue(int(params.get("half_width", 4)))
-        self.bg_offset.setValue(int(params.get("bg_offset", 100)))
-        self.clip_check.setChecked(bool(params.get("clip_negative", True)))
-        self.um_per_px.setValue(float(params.get("um_per_px", DEFAULT_UM_PER_PX)))
-        self.stage_spec.setValue(int(params.get("stage_spec", DEFAULT_STAGE_SPEC)))
+        # The reduction parameters are fixed in code now. A session saved
+        # with different ones is still loaded, but it is re-reduced with
+        # these -- so say so rather than silently changing the numbers.
+        stale = {
+            k: params[k] for k, fixed in (("half_width", HALF_WIDTH),
+                                          ("bg_offset", BG_OFFSET),
+                                          ("clip_negative", CLIP_NEGATIVE),
+                                          ("um_per_px", UM_PER_PX),
+                                          ("stage_spec", STAGE_SPEC))
+            if k in params and params[k] != fixed
+        }
+        if stale:
+            self.log.append_line(
+                f"Session was saved with different parameters {stale}; using the fixed ones.",
+                logging.WARNING,
+            )
         self.x_target.setValue(float(params.get("x_target", DEFAULT_X_TARGET)))
         self.flex_diameter.setValue(float(params.get("flex_diameter_um", DEFAULT_DIAMETER_UM)))
 
