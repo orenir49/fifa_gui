@@ -329,3 +329,31 @@ def test_unit_table_update_and_interpolate(window, qapp, dataset_a, tmp_path):
     # updating again replaces, never duplicates
     window.update_unit_from_dataset()
     assert len(window.unit_table.units) == 1
+
+
+# ------------------------------------------------------------ window layout
+
+def test_only_the_fitting_and_units_tabs_remain(window, qapp):
+    """Inverse and Flexure are gone; the flexure figure moved, not the maths."""
+    labels = [window.tabs.tabText(i) for i in range(window.tabs.count())]
+    assert labels == ["Fitting", "Units"]
+
+
+def test_the_main_window_shows_the_flexure_and_residual_figures(window, qapp):
+    fitting = window.tabs.widget(0)
+
+    def shown_in(widget, ancestor):
+        while widget is not None:
+            if widget is ancestor:
+                return True
+            widget = widget.parentWidget()
+        return False
+
+    assert shown_in(window.flex_plot, fitting)
+    assert shown_in(window.resid_plot, fitting)
+    # The diameter control came with the flexure plot: the acceptance circle
+    # means nothing without it.
+    assert shown_in(window.flex_diameter, fitting)
+    # The track curve is no longer on display, but it is still rendered so
+    # Export keeps writing track.png.
+    assert not window.track_plot.isVisible()

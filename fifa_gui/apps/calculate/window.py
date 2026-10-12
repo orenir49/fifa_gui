@@ -76,10 +76,9 @@ class CalculateWindow(QMainWindow):
     def _build_ui(self):
         self._build_menu()
 
+        self._build_inverse_widgets()
         self.tabs = QTabWidget()
-        self.tabs.addTab(self._build_track_tab(), "Track")
-        self.tabs.addTab(self._build_inverse_tab(), "Inverse")
-        self.tabs.addTab(self._build_flexure_tab(), "Flexure")
+        self.tabs.addTab(self._build_track_tab(), "Fitting")
         self.tabs.addTab(self._build_units_tab(), "Units")
         self.tabs.currentChanged.connect(lambda _: self._refresh_views())
 
@@ -214,14 +213,52 @@ class CalculateWindow(QMainWindow):
         middle_layout.addLayout(view_buttons)
         middle_layout.addWidget(self.frame_label)
 
-        # right: plots over the parameter form
+        # right: the two figures worth watching -- the flexure scatter and the
+        # fit residuals -- over the parameter form. The track curve itself is
+        # no longer shown; the panel is kept off-screen so Export still writes
+        # track.png.
         self.track_plot = MplPanel(width=5, height=3.4)
-        self.resid_plot = MplPanel(width=5, height=3.0)
+        self.track_plot.setVisible(False)
+
+        self.resid_plot = MplPanel(width=7, height=4.4)
+        self.flex_plot = MplPanel(width=7, height=5.2)
+
+        # Moved here with the plot: the acceptance circle is meaningless
+        # without the diameter that draws it.
+        self.flex_diameter = QDoubleSpinBox()
+        self.flex_diameter.setRange(0.1, 10000.0)
+        self.flex_diameter.setDecimals(1)
+        self.flex_diameter.setValue(DEFAULT_DIAMETER_UM)
+        self.flex_diameter.setSuffix(" um")
+        self.flex_diameter.setToolTip(
+            "Diameter, not radius. The notebook drew plt.Circle(centre, 30/2.35),\n"
+            "whose second argument is the radius -- so it plotted a 60 um circle\n"
+            "while labelling it 30 um. Enter 60 to reproduce the old plot."
+        )
+        self.flex_diameter.valueChanged.connect(lambda _: self._refresh_flexure())
+
+        flex_row = QHBoxLayout()
+        flex_row.addWidget(QLabel("Acceptance circle diameter:"))
+        flex_row.addWidget(self.flex_diameter)
+        flex_row.addStretch(1)
+
+        self.flex_label = QLabel(
+            "Select a dataset with repeated frames at one position."
+        )
+        self.flex_label.setStyleSheet("font-family: Consolas, monospace;")
+        self.flex_label.setWordWrap(True)
+
+        flex_panel = QWidget()
+        flex_layout = QVBoxLayout(flex_panel)
+        flex_layout.setContentsMargins(0, 0, 0, 0)
+        flex_layout.addLayout(flex_row)
+        flex_layout.addWidget(self.flex_plot, 1)
+        flex_layout.addWidget(self.flex_label)
 
         plots = QSplitter(Qt.Vertical)
-        plots.addWidget(self.track_plot)
+        plots.addWidget(flex_panel)
         plots.addWidget(self.resid_plot)
-        plots.setSizes([340, 300])
+        plots.setSizes([520, 440])
 
         right = QWidget()
         right_layout = QVBoxLayout(right)
@@ -234,7 +271,13 @@ class CalculateWindow(QMainWindow):
         splitter.addWidget(left)
         splitter.addWidget(middle)
         splitter.addWidget(right)
-        splitter.setSizes([380, 540, 520])
+        splitter.setSizes([320, 440, 840])
+        # Without stretch factors the inspector absorbs every extra pixel and
+        # the two figures stay at their minimum, whatever setSizes asked for.
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setStretchFactor(2, 2)
+        right.setMinimumWidth(560)
         return splitter
 
     def _build_params_box(self):
@@ -297,29 +340,22 @@ class CalculateWindow(QMainWindow):
 
     # --------------------------------------------------------- inverse tab
 
-    def _build_inverse_tab(self):
-        widget = QWidget()
-        layout = QVBoxLayout(widget)
+    def _build_inverse_widgets(self):
+        """The Inverse tab is gone; the inverse solve behind it is not.
 
-        form = QHBoxLayout()
-        form.addWidget(QLabel("Target column x:"))
-        self.x_target = QDoubleSpinBox()
+        Export still writes inverse.csv, so x_target survives as a stored
+        parameter with no control of its own -- it keeps whatever the settings
+        file holds. These two are parented to the window so Qt keeps them
+        alive, and shown nowhere.
+        """
+        self.x_target = QDoubleSpinBox(self)
         self.x_target.setRange(-1e6, 1e6)
         self.x_target.setDecimals(2)
         self.x_target.setValue(DEFAULT_X_TARGET)
-        self.x_target.valueChanged.connect(lambda _: self._refresh_inverse())
-        form.addWidget(self.x_target)
-        form.addStretch(1)
-        layout.addLayout(form)
+        self.x_target.setVisible(False)
 
-        self.inverse_label = QLabel(
-            "Solves col(w) = x for the stage position w, per dataset, and averages them."
-        )
-        self.inverse_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.inverse_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
-        self.inverse_label.setStyleSheet("font-family: Consolas, monospace;")
-        layout.addWidget(self.inverse_label, 1)
-        return widget
+        self.inverse_label = QLabel(self)
+        self.inverse_label.setVisible(False)
 
     # ----------------------------------------------------------- units tab
 
@@ -455,35 +491,6 @@ class CalculateWindow(QMainWindow):
         self.units_file_label.setText(f"Table file: {self.unit_table.path}")
 
     # --------------------------------------------------------- flexure tab
-
-    def _build_flexure_tab(self):
-        widget = QWidget()
-        layout = QVBoxLayout(widget)
-
-        form = QHBoxLayout()
-        form.addWidget(QLabel("Acceptance circle diameter:"))
-        self.flex_diameter = QDoubleSpinBox()
-        self.flex_diameter.setRange(0.1, 10000.0)
-        self.flex_diameter.setDecimals(1)
-        self.flex_diameter.setValue(DEFAULT_DIAMETER_UM)
-        self.flex_diameter.setSuffix(" um")
-        self.flex_diameter.setToolTip(
-            "Diameter, not radius. The notebook drew plt.Circle(centre, 30/2.35),\n"
-            "whose second argument is the radius -- so it plotted a 60 um circle\n"
-            "while labelling it 30 um. Enter 60 to reproduce the old plot."
-        )
-        self.flex_diameter.valueChanged.connect(lambda _: self._refresh_flexure())
-        form.addWidget(self.flex_diameter)
-        form.addStretch(1)
-        layout.addLayout(form)
-
-        self.flex_plot = MplPanel(width=6, height=6)
-        layout.addWidget(self.flex_plot, 1)
-
-        self.flex_label = QLabel("Select a dataset with repeated frames at one position.")
-        self.flex_label.setStyleSheet("font-family: Consolas, monospace;")
-        layout.addWidget(self.flex_label)
-        return widget
 
     # ------------------------------------------------------------- settings
 

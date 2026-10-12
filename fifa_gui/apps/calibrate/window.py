@@ -1032,7 +1032,9 @@ class CalibrateWindow(QMainWindow):
         self.gain.setValue(int(s.value("gain", DEFAULT_GAIN)))
         self.offset.setValue(int(s.value("offset", DEFAULT_OFFSET)))
         self.exposure.setValue(int(s.value("exposure_us", DEFAULT_EXPOSURE_US)))
-        self.stage_uri.setEditText(s.value("stage_uri", "", type=str))
+        # The stage URI is NOT restored. It is whatever is attached now, and
+        # a remembered one only ever sends the app looking for a controller
+        # that has moved or never existed. Type one to override per session.
         # The position list is deliberately NOT restored: every run starts
         # from the standard sweep. Use File > Save/Load plan to keep a
         # custom list.
@@ -1044,7 +1046,6 @@ class CalibrateWindow(QMainWindow):
         s.setValue("gain", self.gain.value())
         s.setValue("offset", self.offset.value())
         s.setValue("exposure_us", self.exposure.value())
-        s.setValue("stage_uri", self.stage_uri.currentText())
 
     def _about(self):
         QMessageBox.about(

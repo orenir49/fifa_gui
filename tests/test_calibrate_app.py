@@ -743,3 +743,51 @@ def test_plans_written_before_the_offset_existed_still_load(tmp_path):
     plan = SequencePlan.from_dict(old)
     assert plan.camera.gain == 120
     assert plan.camera.offset == 30
+
+
+# --------------------------------------------------------- the stage URI
+
+def _stage_choosing(monkeypatch, found, requested=None):
+    """A XimcStage whose enumeration returns `found`, without any driver."""
+    from fifa_gui.hardware import ximc as ximc_mod
+
+    monkeypatch.setattr(ximc_mod, "enumerate_stages", lambda: list(found))
+    stage = ximc_mod.XimcStage(uri=requested)
+    return stage._choose_uri()[0]
+
+
+def test_a_stale_uri_never_beats_an_attached_controller(monkeypatch):
+    """The bug: the GUI went looking for a stage at fake://stage.
+
+    A URI saved from a previous session (or written into the settings store by
+    something else) must not be preferred over what enumeration actually finds.
+    """
+    real = r"xi-com:\.\COM5"
+    assert _stage_choosing(monkeypatch, [real], "fake://stage") == real
+    assert _stage_choosing(monkeypatch, [real], "") == real
+    assert _stage_choosing(monkeypatch, [real], None) == real
+    # A URI that is genuinely attached is still honoured over the first found.
+    other = r"xi-com:\.\COM7"
+    assert _stage_choosing(monkeypatch, [real, other], other) == other
+
+
+def test_a_typed_uri_is_tried_when_the_probe_finds_nothing(monkeypatch):
+    """ENUMERATE_PROBE does miss controllers, so a real URI is still worth a go."""
+    typed = r"xi-com:\.\COM5"
+    assert _stage_choosing(monkeypatch, [], typed) == typed
+    # ... but nonsense is not, and there is nothing to fall back to.
+    assert _stage_choosing(monkeypatch, [], "fake://stage") is None
+    assert _stage_choosing(monkeypatch, [], "") is None
+
+
+def test_the_stage_uri_is_not_remembered_between_sessions(qapp, monkeypatch,
+                                                          isolated_qsettings):
+    win = _no_hardware_window(monkeypatch)
+    win.stage_uri.setEditText("fake://stage")
+    win.close()
+    qapp.processEvents()
+
+    win2 = _no_hardware_window(monkeypatch)
+    assert win2.stage_uri.currentText() == ""
+    win2.close()
+    qapp.processEvents()
