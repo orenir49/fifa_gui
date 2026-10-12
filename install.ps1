@@ -6,6 +6,7 @@
     .\install.bat                 double-click, or run from cmd
     .\install.bat -Hardware       lab PC: also install the camera and stage packages
     .\install.bat -Build          build machine: also install PyInstaller and pytest
+    .\install.bat -InstallPython  install Python 3.12 with winget if none is found
 
 .NOTES
     If PowerShell refuses with "running scripts is disabled on this system",
@@ -18,6 +19,7 @@ param(
     [switch]$Build,               # implies -Hardware, adds PyInstaller + pytest
     [switch]$Recreate,            # delete and rebuild .venv from scratch
     [switch]$NoDownload,          # never download the ZWO SDK; fail with instructions
+    [switch]$InstallPython,       # install Python 3.12 via winget if none is found
     [string]$Wheelhouse = ""      # offline install from a folder of wheels
 )
 
@@ -75,15 +77,54 @@ function Find-Python {
     return $null
 }
 
+# winget writes the new interpreter to PATH for *future* processes, so this
+# one has to re-read the machine and user PATH before it can see it. The
+# well-known per-user install directory is probed too, in case PATH was not
+# updated at all.
+function Update-PathFromRegistry {
+    $machine = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+    $user    = [Environment]::GetEnvironmentVariable('Path', 'User')
+    $env:Path = (@($machine, $user) | Where-Object { $_ }) -join ';'
+}
+
+function Install-Python {
+    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+        Warn "winget is not available on this machine, so Python cannot be installed automatically."
+        return $false
+    }
+    Info "Installing Python 3.12 (64-bit) with winget. Windows may ask you to approve it ..."
+    # --scope user keeps it out of Program Files, so no admin rights are needed.
+    & winget install --id Python.Python.3.12 --architecture x64 --scope user `
+        --exact --silent --accept-package-agreements --accept-source-agreements
+    $rc = $LASTEXITCODE
+    # winget reports 'no applicable upgrade' and friends as non-zero; the probe
+    # below is the real test, so a non-zero code is a warning, not the end.
+    if ($rc -ne 0) { Warn "winget exited with code $rc. Checking for Python anyway." }
+    Update-PathFromRegistry
+    return $true
+}
+
 $py = Find-Python
+if (-not $py -and $InstallPython) {
+    if (Install-Python) { $py = Find-Python }
+    if ($py) { Ok "Python 3.12 installed." }
+}
 if (-not $py) {
+    $hint = if ($InstallPython) {
+        "The automatic install did not produce a usable Python 3.12."
+    } else {
+        "Re-run with -InstallPython to let winget install it for you."
+    }
     Die @"
 No 64-bit Python 3.12 found.
-Install it from
+$hint
+Install it by hand from
   https://www.python.org/downloads/release/python-31210/
 ticking 'Add python.exe to PATH' and 'py launcher', then run this script again.
 Python 3.13+ is not supported by this pinned dependency set, and a 32-bit
 Python cannot load the camera and stage DLLs, which are x64 only.
+If winget has just installed it, a new terminal may be needed for PATH to
+carry over.
 "@
 }
 Ok "Using Python $($py.Ver) 64-bit  ($($py.Exe) $($py.Args))"

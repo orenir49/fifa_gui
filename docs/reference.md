@@ -17,10 +17,20 @@ Standa/XIMC stage.
 .\install.bat                 analysis only (Calculate)
 .\install.bat -Hardware       lab PC: adds the camera and stage packages
 .\install.bat -Build          build machine: adds PyInstaller and pytest
+.\install.bat -InstallPython  install Python 3.12 with winget if none is found
 ```
 
 Double-clicking `install.bat` works: it passes `-ExecutionPolicy Bypass` for
 that one process, so no admin rights or policy changes are needed.
+
+Python itself is checked, not installed, unless `-InstallPython` is given: the
+script looks for `py -3.12`, then `python` on PATH, then the usual per-user
+install directory, and requires exactly 3.12.x and 64-bit. With
+`-InstallPython` it runs `winget install Python.Python.3.12 --architecture x64
+--scope user` when none is found, re-reads PATH from the registry, and looks
+again; without winget, or if the install does not produce a usable 3.12, it
+stops with the manual download link as before. `--scope user` keeps it out of
+Program Files, so no admin rights are needed.
 
 The script finds a 64-bit Python 3.12, creates `.venv`, installs the pinned
 dependencies, fetches `ASICamera2.dll` (with `-Hardware`/`-Build`), and verifies

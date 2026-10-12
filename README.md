@@ -20,7 +20,8 @@ Two Windows applications for the FIFA fiber calibration.
 3. **Double-click `Run FIFA Calculate.bat`** — or `Run FIFA Calibrate.bat`
 
 The installer tells you if anything is missing that it could not install for
-you.
+you. It needs 64-bit Python 3.12 and will not install it for you unless you
+ask: run `install.bat -InstallPython` from a terminal to let winget do it.
 
 > Don't want to clone? Download a ready-made `.zip` from
 > [Releases](https://github.com/orenir49/fifa_gui/releases), extract the whole
