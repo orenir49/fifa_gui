@@ -12,7 +12,11 @@ from dataclasses import dataclass, field, asdict
 DEFAULT_BACKOFF = 110000
 DEFAULT_SETTLE_MS = 99
 DEFAULT_REPEATS = 1
-DEFAULT_GAIN = 120
+#: Unity gain. The fiber spot is bright, so gain buys noise, not signal.
+DEFAULT_GAIN = 0
+#: ASI_OFFSET, in ADU. Lifts the floor off zero so the background noise is
+#: symmetric instead of clipped, which is what a dark subtraction needs.
+DEFAULT_OFFSET = 30
 #: Exposure is in MICROseconds, which is the unit ASI_EXPOSURE takes. The
 #: ASI294MM Pro goes down to ~32 us, and that short end is the useful one here:
 #: the fiber spot is bright enough that a millisecond saturates it.
@@ -25,6 +29,7 @@ FRAME_BYTES = 5644 * 8288 * 2
 @dataclass
 class CameraSettings:
     gain: int = DEFAULT_GAIN
+    offset: int = DEFAULT_OFFSET
     exposure_us: int = DEFAULT_EXPOSURE_US
     image_type: str = "RAW16"
     cooler_on: bool = False

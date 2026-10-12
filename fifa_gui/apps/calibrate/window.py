@@ -10,8 +10,8 @@ from PySide6.QtGui import QAction, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFormLayout,
     QFrame, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
-    QMainWindow, QMessageBox, QProgressBar, QPushButton, QSpinBox,
-    QSplitter, QTableView, QVBoxLayout, QWidget,
+    QMainWindow, QMessageBox, QProgressBar, QPushButton, QSlider,
+    QSpinBox, QSplitter, QTableView, QVBoxLayout, QWidget,
 )
 
 from fifa_gui import __version__
@@ -22,8 +22,8 @@ from fifa_gui.apps.calibrate.worker import (
     STATE_WAITING_OPERATOR, AcquisitionWorker,
 )
 from fifa_gui.core.sequence import (
-    DEFAULT_BACKOFF, DEFAULT_EXPOSURE_US, DEFAULT_REPEATS, DEFAULT_SETTLE_MS,
-    CameraSettings, SequencePlan, validate,
+    DEFAULT_BACKOFF, DEFAULT_EXPOSURE_US, DEFAULT_GAIN, DEFAULT_OFFSET,
+    DEFAULT_REPEATS, DEFAULT_SETTLE_MS, CameraSettings, SequencePlan, validate,
 )
 from fifa_gui.qtutil.imageview import COLOR_CENTROID, ImageView
 from fifa_gui.qtutil.logpanel import LogPanel
@@ -308,7 +308,22 @@ class CalibrateWindow(QMainWindow):
         self.camera_label = QLabel("not connected")
         self.camera_label.setWordWrap(True)
 
-        self.gain = QSpinBox(); self.gain.setRange(0, 600); self.gain.setValue(120)
+        self.gain = QSpinBox()
+        self.gain.setRange(0, 600)
+        self.gain.setValue(DEFAULT_GAIN)
+        self.gain.setToolTip(
+            "Unity gain by default: the fiber spot is bright enough that "
+            "gain only adds read noise."
+        )
+
+        self.offset = QSpinBox()
+        self.offset.setRange(0, 600)
+        self.offset.setValue(DEFAULT_OFFSET)
+        self.offset.setSuffix(" ADU")
+        self.offset.setToolTip(
+            "ASI_OFFSET: the black level. Lifts the floor off zero so the "
+            "background noise is symmetric rather than clipped at 0."
+        )
 
         # Microseconds, which is the unit ASI_EXPOSURE takes. The useful end for
         # a bright fiber spot is the short one -- around 32 us -- so a spin box
@@ -338,6 +353,7 @@ class CalibrateWindow(QMainWindow):
 
         form = QFormLayout()
         form.addRow("Gain", self.gain)
+        form.addRow("Offset (bias)", self.offset)
         form.addRow("Exposure", self.exposure)
         form.addRow("", self.exposure_hint)
         form.addRow("Image type", self.image_type)
@@ -476,21 +492,27 @@ class CalibrateWindow(QMainWindow):
         )
         self.auto_levels.toggled.connect(self._on_auto_levels_toggled)
 
-        self.vmin = QSpinBox()
+        # Sliders, not boxes: a cut on a 16-bit frame is dragged until it
+        # looks right, not a number anyone knows up front. The readouts
+        # beside them keep the actual value legible.
+        self.vmin = QSlider(Qt.Horizontal)
         self.vmin.setRange(0, 65535)
-        self.vmin.setGroupSeparatorShown(True)
         self.vmin.setEnabled(False)
         self.vmin.valueChanged.connect(self._redraw_last_frame)
+        self.vmin_label = QLabel("0")
+        self.vmin_label.setMinimumWidth(52)
+        self.vmin_label.setStyleSheet("font-family: Consolas, monospace;")
 
-        self.vmax = QSpinBox()
+        self.vmax = QSlider(Qt.Horizontal)
         self.vmax.setRange(1, 65535)
         self.vmax.setValue(65535)
-        self.vmax.setGroupSeparatorShown(True)
         self.vmax.setEnabled(False)
         self.vmax.valueChanged.connect(self._redraw_last_frame)
-
+        self.vmax_label = QLabel("65,535")
+        self.vmax_label.setMinimumWidth(52)
+        self.vmax_label.setStyleSheet("font-family: Consolas, monospace;")
         self.log_levels = QCheckBox("Log")
-        self.log_levels.setChecked(True)
+        self.log_levels.setChecked(False)
         self.log_levels.setToolTip(
             "Logarithmic stretch, so the faint halo is visible next to a core\n"
             "that is near full well."
@@ -501,11 +523,12 @@ class CalibrateWindow(QMainWindow):
         levels.addWidget(QLabel("Scale:"))
         levels.addWidget(self.auto_levels)
         levels.addWidget(QLabel("vmin"))
-        levels.addWidget(self.vmin)
+        levels.addWidget(self.vmin, 1)
+        levels.addWidget(self.vmin_label)
         levels.addWidget(QLabel("vmax"))
-        levels.addWidget(self.vmax)
+        levels.addWidget(self.vmax, 1)
+        levels.addWidget(self.vmax_label)
         levels.addWidget(self.log_levels)
-        levels.addStretch(1)
 
         layout.addWidget(self.view, 1)
         layout.addLayout(levels)
@@ -543,6 +566,8 @@ class CalibrateWindow(QMainWindow):
             lo, hi = float(self.vmin.value()), float(self.vmax.value())
             if hi <= lo:
                 hi = lo + 1.0
+        self.vmin_label.setText(f"{int(lo):,}")
+        self.vmax_label.setText(f"{int(hi):,}")
         self.view.set_frame(
             self._last_preview, factor=8, levels=(lo, hi),
             log=self.log_levels.isChecked(),
@@ -758,6 +783,7 @@ class CalibrateWindow(QMainWindow):
     def _camera_settings(self):
         return CameraSettings(
             gain=self.gain.value(),
+            offset=self.offset.value(),
             exposure_us=self.exposure.value(),
             image_type=self.image_type.currentText(),
             cooler_on=self.cooler.isChecked(),
@@ -986,6 +1012,7 @@ class CalibrateWindow(QMainWindow):
         self.out_dir.setText(plan.out_dir)
         self.overwrite_check.setChecked(plan.overwrite)
         self.gain.setValue(plan.camera.gain)
+        self.offset.setValue(plan.camera.offset)
         self.exposure.setValue(int(plan.camera.exposure_us))
         self.image_type.setCurrentText(plan.camera.image_type)
         self.cooler.setChecked(plan.camera.cooler_on)
@@ -1002,7 +1029,8 @@ class CalibrateWindow(QMainWindow):
         # The output directory is deliberately NOT restored: it must be named
         # for the unit being measured, and a remembered path silently writes
         # the next sweep into the previous unit's folder.
-        self.gain.setValue(int(s.value("gain", 120)))
+        self.gain.setValue(int(s.value("gain", DEFAULT_GAIN)))
+        self.offset.setValue(int(s.value("offset", DEFAULT_OFFSET)))
         self.exposure.setValue(int(s.value("exposure_us", DEFAULT_EXPOSURE_US)))
         self.stage_uri.setEditText(s.value("stage_uri", "", type=str))
         # The position list is deliberately NOT restored: every run starts
@@ -1014,6 +1042,7 @@ class CalibrateWindow(QMainWindow):
         s = self.settings
         s.setValue("geometry", self.saveGeometry())
         s.setValue("gain", self.gain.value())
+        s.setValue("offset", self.offset.value())
         s.setValue("exposure_us", self.exposure.value())
         s.setValue("stage_uri", self.stage_uri.currentText())
 

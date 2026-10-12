@@ -90,13 +90,18 @@ def dataset_flex(synthetic_root):
 
 
 @pytest.fixture(autouse=True)
-def isolated_qsettings(tmp_path):
+def isolated_qsettings(tmp_path, monkeypatch):
     """Keep the tests out of the developer's real QSettings store.
 
     Without this the Calibrate window restores whatever position list and
     camera settings happen to be saved on this machine, so a test asserting on
     the defaults fails depending on what was last done in the real app -- and
     worse, the tests overwrite those saved settings.
+
+    setDefaultFormat/setPath is NOT enough: QSettings(org, app) still resolves
+    to NativeFormat, which on Windows is the registry, and setPath cannot
+    redirect that. So the windows' own QSettings name is replaced with one
+    bound to an ini file under tmp_path.
     """
     try:
         from PySide6.QtCore import QSettings
@@ -104,8 +109,16 @@ def isolated_qsettings(tmp_path):
         yield
         return
 
-    QSettings.setDefaultFormat(QSettings.IniFormat)
-    QSettings.setPath(
-        QSettings.IniFormat, QSettings.UserScope, str(tmp_path / "qsettings")
-    )
+    ini = str(tmp_path / "qsettings.ini")
+
+    def fake_qsettings(*args, **kwargs):
+        return QSettings(ini, QSettings.IniFormat)
+
+    for module in ("fifa_gui.apps.calibrate.window",
+                   "fifa_gui.apps.calculate.window"):
+        try:
+            __import__(module)
+        except ImportError:      # the app's dependencies are not installed
+            continue
+        monkeypatch.setattr(module + ".QSettings", fake_qsettings, raising=False)
     yield

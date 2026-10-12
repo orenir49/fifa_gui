@@ -677,3 +677,69 @@ def test_the_output_directory_starts_empty_and_asks_for_a_unit_name(
     assert win2.out_dir_prompt.isVisibleTo(win2)
     win2.close()
     qapp.processEvents()
+
+
+# ------------------------------------------------ preview scaling and gain
+
+def test_the_level_cuts_are_sliders_not_boxes(qapp, monkeypatch):
+    """A cut on a 16-bit frame is dragged until it looks right."""
+    from PySide6.QtWidgets import QSlider
+
+    win = _no_hardware_window(monkeypatch)
+    assert isinstance(win.vmin, QSlider)
+    assert isinstance(win.vmax, QSlider)
+    assert win.vmin.maximum() == 65535 and win.vmax.maximum() == 65535
+
+    # Manual cuts drive the redraw, and the readouts follow -- a bare slider
+    # gives no way to tell what value was picked.
+    win._last_preview = np.full((16, 16), 500, dtype=np.uint16)
+    win._last_meta = {"peak": 500.0}
+    win.auto_levels.setChecked(False)
+    win.vmin.setValue(100)
+    win.vmax.setValue(900)
+    qapp.processEvents()
+    assert win.vmin_label.text() == "100"
+    assert win.vmax_label.text() == "900"
+
+    win.close()
+    qapp.processEvents()
+
+
+def test_the_preview_starts_linear(qapp, monkeypatch):
+    """Linear is the stretch whose pixel values can be read off the display."""
+    win = _no_hardware_window(monkeypatch)
+    assert not win.log_levels.isChecked()
+    win.close()
+    qapp.processEvents()
+
+
+def test_gain_defaults_to_unity_and_the_offset_to_30_adu(qapp, monkeypatch,
+                                                         isolated_qsettings):
+    from fifa_gui.core.sequence import DEFAULT_GAIN, DEFAULT_OFFSET
+
+    assert DEFAULT_GAIN == 0
+    assert DEFAULT_OFFSET == 30
+    assert CameraSettings().gain == 0
+    assert CameraSettings().offset == 30
+
+    win = _no_hardware_window(monkeypatch)
+    assert win.gain.value() == 0
+    assert win.offset.value() == 30
+    assert "ADU" in win.offset.suffix()
+    assert win._plan().camera.offset == 30
+    win.close()
+    qapp.processEvents()
+
+
+def test_the_configured_offset_reaches_the_camera(worker, qapp, tmp_path):
+    worker._run_sequence(_plan(tmp_path, camera=CameraSettings(offset=42)))
+    assert worker._camera.settings.offset == 42
+
+
+def test_plans_written_before_the_offset_existed_still_load(tmp_path):
+    """The offset is new; an older saved plan has no key for it."""
+    old = {"targets": [285000], "out_dir": str(tmp_path),
+           "camera": {"gain": 120, "exposure_us": 1000}}
+    plan = SequencePlan.from_dict(old)
+    assert plan.camera.gain == 120
+    assert plan.camera.offset == 30

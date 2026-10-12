@@ -94,6 +94,14 @@ class ZwoCamera(CameraBase):
         image_type = getattr(asi, f"ASI_IMG_{settings.image_type}", asi.ASI_IMG_RAW16)
         self._cam.set_image_type(image_type)
         self._cam.set_control_value(asi.ASI_GAIN, int(settings.gain))
+        # The SDK calls the offset ASI_OFFSET; older zwoasi builds only
+        # expose it under its original name, ASI_BRIGHTNESS.
+        offset_control = getattr(asi, "ASI_OFFSET", None)
+        if offset_control is None:
+            offset_control = getattr(asi, "ASI_BRIGHTNESS", None)
+        if offset_control is not None:
+            self._cam.set_control_value(offset_control, int(settings.offset))
+        self._offset_control = offset_control
         # ASI_EXPOSURE is in MICROseconds. The notebook never set it at all, so
         # frames ran at whatever the SDK default happened to be -- which is how
         # the archived mast00 and mast03 datasets ended up saturated.
@@ -106,11 +114,14 @@ class ZwoCamera(CameraBase):
                     asi.ASI_TARGET_TEMP, int(settings.target_temp_c)
                 )
 
-        return {
+        applied = {
             "gain": self._cam.get_control_value(asi.ASI_GAIN)[0],
             "exposure_us": self._cam.get_control_value(asi.ASI_EXPOSURE)[0],
             "image_type": settings.image_type,
         }
+        if offset_control is not None:
+            applied["offset"] = self._cam.get_control_value(offset_control)[0]
+        return applied
 
     def exposure_range_us(self):
         """(min, max, default) for ASI_EXPOSURE, in microseconds.
