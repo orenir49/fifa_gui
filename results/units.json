@@ -23,10 +23,10 @@
       "n_frames": 6,
       "source": "C:\\Users\\oreni\\Documents\\code\\lab\\mast01\\1",
       "updated_utc": "2026-10-12T06:26:40+00:00",
-      "target_stage": null,
-      "target_x": null,
-      "target_y": null,
-      "target_from": ""
+      "target_stage": 300000.0,
+      "target_x": 4717.137373601477,
+      "target_y": 3107.090713584826,
+      "target_from": "stage"
     },
     "mast02": {
       "coef_x": [
@@ -49,10 +49,10 @@
       "n_frames": 6,
       "source": "C:\\Users\\oreni\\Documents\\code\\lab\\mast02\\1",
       "updated_utc": "2026-10-12T06:26:40+00:00",
-      "target_stage": null,
-      "target_x": null,
-      "target_y": null,
-      "target_from": ""
+      "target_stage": 300000.0,
+      "target_x": 4595.108216488204,
+      "target_y": 2469.2437668029274,
+      "target_from": "stage"
     },
     "mast03": {
       "coef_x": [
@@ -75,10 +75,10 @@
       "n_frames": 6,
       "source": "C:\\Users\\oreni\\Documents\\code\\lab\\mast03\\1",
       "updated_utc": "2026-10-12T06:26:40+00:00",
-      "target_stage": null,
-      "target_x": null,
-      "target_y": null,
-      "target_from": ""
+      "target_stage": 300000.0,
+      "target_x": 4569.706574672426,
+      "target_y": 2812.8250552866143,
+      "target_from": "stage"
     },
     "mast04": {
       "coef_x": [
@@ -101,10 +101,10 @@
       "n_frames": 6,
       "source": "C:\\Users\\oreni\\Documents\\code\\lab\\mast04\\1",
       "updated_utc": "2026-10-12T06:26:40+00:00",
-      "target_stage": null,
-      "target_x": null,
-      "target_y": null,
-      "target_from": ""
+      "target_stage": 300000.0,
+      "target_x": 4395.822011071194,
+      "target_y": 2536.490236771958,
+      "target_from": "stage"
     }
   }
 }
