@@ -7,7 +7,8 @@ import numpy as np
 from PySide6.QtCore import QSettings, Qt, QThreadPool, QTimer, Slot
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
-    QCheckBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
+    QCheckBox, QDialog, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox,
+    QHBoxLayout,
     QHeaderView, QLabel, QMainWindow, QMessageBox, QProgressBar, QPushButton,
     QSpinBox, QSplitter, QTabWidget, QTableView, QTreeWidget, QTreeWidgetItem,
     QVBoxLayout, QWidget,
@@ -25,11 +26,26 @@ from fifa_gui.core.unittable import UnitEntry, UnitTable, guess_unit_name
 from fifa_gui.qtutil.imageview import (
     COLOR_BKG, COLOR_CENTROID, COLOR_OTHER, COLOR_ROI, COLOR_TRACK, ImageView,
 )
-from fifa_gui.qtutil.logpanel import LogPanel
 from fifa_gui.qtutil.mplcanvas import MplPanel
 from fifa_gui.paths import unit_table_path
 
 logger = logging.getLogger(__name__)
+
+
+class _StatusLog:
+    """Stand-in for the log panel that used to sit under the tabs.
+
+    The panel is gone; the messages are not. They go to the status bar,
+    which costs no permanent space, and to the Python logger, which is
+    what ends up in a file and is still there after the message clears.
+    """
+
+    def __init__(self, window):
+        self._window = window
+
+    def append_line(self, text, level=logging.INFO):
+        logger.log(level, "%s", text)
+        self._window.statusBar().showMessage(text, 10000)
 
 #: the notebook's ZWO plate scale. The ASI294MM Pro reports 2.315 um pixels;
 #: 2.35 is kept as the default so results match what has already been recorded.
@@ -74,6 +90,7 @@ class CalculateWindow(QMainWindow):
     # ------------------------------------------------------------------- UI
 
     def _build_ui(self):
+        self.log = _StatusLog(self)
         self._build_menu()
 
         self._build_inverse_widgets()
@@ -82,14 +99,10 @@ class CalculateWindow(QMainWindow):
         self.tabs.addTab(self._build_units_tab(), "Units")
         self.tabs.currentChanged.connect(lambda _: self._refresh_views())
 
-        self.log = LogPanel()
-        self.log.setMaximumHeight(130)
-
         central = QWidget()
         layout = QVBoxLayout(central)
         layout.setContentsMargins(6, 6, 6, 6)
         layout.addWidget(self.tabs, 1)
-        layout.addWidget(self.log)
         self.setCentralWidget(central)
 
         self.progress = QProgressBar()
@@ -166,10 +179,17 @@ class CalculateWindow(QMainWindow):
         reload_btn = QPushButton("Reload")
         reload_btn.setToolTip("Re-read the frames with the current ROI parameters")
         reload_btn.clicked.connect(self.reload_all)
+        inspect_btn = QPushButton("Inspect frame...")
+        inspect_btn.setToolTip(
+            "Open the selected frame: ROI and background boxes, the centroid, "
+            "and click-to-recentroid."
+        )
+        inspect_btn.clicked.connect(self._show_inspector)
         buttons = QHBoxLayout()
         buttons.addWidget(add_btn)
         buttons.addWidget(remove_btn)
         buttons.addWidget(reload_btn)
+        buttons.addWidget(inspect_btn)
 
         left = QWidget()
         left_layout = QVBoxLayout(left)
@@ -206,12 +226,18 @@ class CalculateWindow(QMainWindow):
         view_buttons.addWidget(self.revert_btn)
         view_buttons.addStretch(1)
 
-        middle = QWidget()
-        middle_layout = QVBoxLayout(middle)
-        middle_layout.setContentsMargins(0, 0, 0, 0)
-        middle_layout.addWidget(self.view, 1)
-        middle_layout.addLayout(view_buttons)
-        middle_layout.addWidget(self.frame_label)
+        # The frame itself is no longer on the Fitting tab, which is for the
+        # two figures. It keeps its own window so click-to-recentroid and
+        # the ROI overlays survive the move.
+        self.inspector = QDialog(self)
+        self.inspector.setWindowTitle("Frame inspector")
+        self.inspector.setWindowFlag(Qt.Tool)
+        self.inspector.resize(900, 720)
+        inspector_layout = QVBoxLayout(self.inspector)
+        inspector_layout.setContentsMargins(6, 6, 6, 6)
+        inspector_layout.addWidget(self.view, 1)
+        inspector_layout.addLayout(view_buttons)
+        inspector_layout.addWidget(self.frame_label)
 
         # right: the two figures worth watching -- the flexure scatter and the
         # fit residuals -- over the parameter form. The track curve itself is
@@ -269,16 +295,18 @@ class CalculateWindow(QMainWindow):
 
         splitter = QSplitter(Qt.Horizontal)
         splitter.addWidget(left)
-        splitter.addWidget(middle)
         splitter.addWidget(right)
-        splitter.setSizes([320, 440, 840])
-        # Without stretch factors the inspector absorbs every extra pixel and
-        # the two figures stay at their minimum, whatever setSizes asked for.
+        splitter.setSizes([380, 1180])
+        # The figures take every extra pixel; the dataset tree does not.
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
-        splitter.setStretchFactor(2, 2)
-        right.setMinimumWidth(560)
+        right.setMinimumWidth(620)
         return splitter
+
+    def _show_inspector(self):
+        self.inspector.show()
+        self.inspector.raise_()
+        self.inspector.activateWindow()
 
     def _build_params_box(self):
         box = QGroupBox("Parameters")

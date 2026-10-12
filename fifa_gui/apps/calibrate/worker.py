@@ -23,7 +23,7 @@ from fifa_gui.apps.calibrate.commands import (
     ApplyCamera, Connect, Disconnect, HomeZero, MoveTo, RunSequence, Shutdown,
     TestExposure,
 )
-from fifa_gui.core.imageio import decimate, full_scale
+from fifa_gui.core.imageio import decimate_peak, full_scale
 from fifa_gui.hardware.base import (
     Aborted, DeviceError, NotConnectedError, NullCamera, NullStage,
 )
@@ -83,6 +83,7 @@ class _SaveTask(QRunnable):
 class AcquisitionWorker(QObject):
     hardware_changed = Signal(object, object, list)   # camera info, stage info, problems
     exposure_range = Signal(object)                  # (min_us, max_us, default_us) or None
+    offset_range = Signal(object)                    # (min, max, default) in ADU, or None
     position_changed = Signal(int)
     limits_changed = Signal(int, int)
     temperature = Signal(object, object)
@@ -211,6 +212,13 @@ class AcquisitionWorker(QObject):
             self.log.emit(logging.INFO, f"camera {camera_info.name} ({camera_info.detail})")
             rng = getattr(self._camera, "exposure_range_us", lambda: None)()
             self.exposure_range.emit(rng)
+            off = getattr(self._camera, "offset_range", lambda: None)()
+            self.offset_range.emit(off)
+            if off:
+                self.log.emit(
+                    logging.INFO,
+                    f"offset range {off[0]:,} .. {off[1]:,} ADU (default {off[2]:,})",
+                )
             if rng:
                 self.log.emit(
                     logging.INFO,
@@ -293,7 +301,7 @@ class AcquisitionWorker(QObject):
         self.log.emit(logging.INFO, "test exposure ...")
         image = self._expose(max(settings.exposure_s * 4 + 30, 30))
         meta = self._frame_metadata(image)
-        self.frame_ready.emit(decimate(image, PREVIEW_DECIMATION), meta)
+        self.frame_ready.emit(decimate_peak(image, PREVIEW_DECIMATION), meta)
         self.log.emit(
             logging.INFO,
             f"test exposure peak {meta['peak']:.0f} ADU "
@@ -364,7 +372,7 @@ class AcquisitionWorker(QObject):
 
                     self.frame_progress.emit(self._index, self._total, f"saving {name}")
                     self._savers.start(_SaveTask(path, image, self._save_signals))
-                    self.frame_ready.emit(decimate(image, PREVIEW_DECIMATION), meta)
+                    self.frame_ready.emit(decimate_peak(image, PREVIEW_DECIMATION), meta)
 
                     # Saturation is recorded and reported, and the run continues.
                     self.log.emit(

@@ -14,9 +14,10 @@ DEFAULT_SETTLE_MS = 99
 DEFAULT_REPEATS = 1
 #: Unity gain. The fiber spot is bright, so gain buys noise, not signal.
 DEFAULT_GAIN = 0
-#: ASI_OFFSET, in ADU. Lifts the floor off zero so the background noise is
-#: symmetric instead of clipped, which is what a dark subtraction needs.
-DEFAULT_OFFSET = 30
+#: ASI_OFFSET, in ADU. Lifts the floor well clear of zero: at 30 the spot
+#: sat on a floor that was still clipping, which is what made it so hard to
+#: see in a test exposure. The camera's own range is read on connect.
+DEFAULT_OFFSET = 1800
 #: Exposure is in MICROseconds, which is the unit ASI_EXPOSURE takes. The
 #: ASI294MM Pro goes down to ~32 us, and that short end is the useful one here:
 #: the fiber spot is bright enough that a millisecond saturates it.

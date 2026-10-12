@@ -357,3 +357,38 @@ def test_the_main_window_shows_the_flexure_and_residual_figures(window, qapp):
     # The track curve is no longer on display, but it is still rendered so
     # Export keeps writing track.png.
     assert not window.track_plot.isVisible()
+
+
+def test_the_frame_view_is_not_on_the_fitting_tab(window, qapp):
+    """The tab is for the two figures; the frame has its own window."""
+    fitting = window.tabs.widget(0)
+
+    def shown_in(widget, ancestor):
+        while widget is not None:
+            if widget is ancestor:
+                return True
+            widget = widget.parentWidget()
+        return False
+
+    assert not shown_in(window.view, fitting)
+    assert shown_in(window.view, window.inspector)
+    assert not window.inspector.isVisible()
+
+    # Click-to-recentroid came along rather than being deleted.
+    assert shown_in(window.pick_check, window.inspector)
+    window._show_inspector()
+    qapp.processEvents()
+    assert window.inspector.isVisible()
+    assert not window.inspector.isModal()
+
+
+def test_there_is_no_log_panel(window, qapp):
+    """Messages go to the status bar and the logger, not a pane in the window."""
+    from PySide6.QtWidgets import QPlainTextEdit, QTextEdit
+
+    assert not window.centralWidget().findChildren(QPlainTextEdit)
+    assert not window.centralWidget().findChildren(QTextEdit)
+
+    # The call sites still work, and land somewhere a person can see.
+    window.log.append_line("hello from the test")
+    assert "hello from the test" in window.statusBar().currentMessage()

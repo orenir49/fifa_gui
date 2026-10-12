@@ -96,9 +96,27 @@ def decimate(image, factor):
     return np.ascontiguousarray(image[::factor, ::factor])
 
 
+def decimate_peak(image, factor):
+    """Block maximum, for a preview that has to show a point source.
+
+    Strided decimation keeps one pixel in factor**2, so a spot a few pixels
+    across usually falls between the samples and the preview looks empty --
+    which is exactly what the fiber spot is. Taking each block's brightest
+    pixel keeps the spot, at its real peak value, wherever it landed.
+    """
+    rows = (image.shape[0] // factor) * factor
+    cols = (image.shape[1] // factor) * factor
+    if rows == 0 or cols == 0:          # smaller than one block
+        return decimate(image, factor)
+    blocks = image[:rows, :cols].reshape(
+        rows // factor, factor, cols // factor, factor
+    )
+    return np.ascontiguousarray(blocks.max(axis=(1, 3)))
+
+
 def build_pyramid(image, factors=(8, 4)):
     """Decimation levels kept for display after the full frame is discarded."""
-    return {f: decimate(image, f) for f in factors}
+    return {f: decimate_peak(image, f) for f in factors}
 
 
 def crop(image, row, col, size):

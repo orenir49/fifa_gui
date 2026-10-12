@@ -123,6 +123,26 @@ class ZwoCamera(CameraBase):
             applied["offset"] = self._cam.get_control_value(offset_control)[0]
         return applied
 
+    def offset_range(self):
+        """(min, max, default) for the offset control, in ADU.
+
+        Same shape as exposure_range_us, and read for the same reason: a
+        value the camera will not take is silently clamped by the SDK, so
+        the spin box has to know the real limits. Returns None when the
+        camera cannot be asked.
+        """
+        if not self.connected:
+            return None
+        try:
+            controls = self._cam.get_controls()
+            control = controls.get("Offset") or controls.get("Brightness")
+            if control is not None:
+                return (int(control["MinValue"]), int(control["MaxValue"]),
+                        int(control["DefaultValue"]))
+        except Exception:
+            logger.exception("could not read the offset range")
+        return None
+
     def exposure_range_us(self):
         """(min, max, default) for ASI_EXPOSURE, in microseconds.
 

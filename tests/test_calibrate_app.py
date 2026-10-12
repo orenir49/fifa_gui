@@ -713,20 +713,23 @@ def test_the_preview_starts_linear(qapp, monkeypatch):
     qapp.processEvents()
 
 
-def test_gain_defaults_to_unity_and_the_offset_to_30_adu(qapp, monkeypatch,
-                                                         isolated_qsettings):
+def test_gain_defaults_to_unity_and_the_offset_lifts_the_floor(
+    qapp, monkeypatch, isolated_qsettings
+):
     from fifa_gui.core.sequence import DEFAULT_GAIN, DEFAULT_OFFSET
 
     assert DEFAULT_GAIN == 0
-    assert DEFAULT_OFFSET == 30
+    assert DEFAULT_OFFSET == 1800
     assert CameraSettings().gain == 0
-    assert CameraSettings().offset == 30
+    assert CameraSettings().offset == 1800
 
     win = _no_hardware_window(monkeypatch)
     assert win.gain.value() == 0
-    assert win.offset.value() == 30
+    assert win.offset.value() == 1800
     assert "ADU" in win.offset.suffix()
-    assert win._plan().camera.offset == 30
+    assert win._plan().camera.offset == 1800
+    # 1800 must actually fit: the box used to stop at 600.
+    assert win.offset.maximum() >= 1800
     win.close()
     qapp.processEvents()
 
@@ -742,7 +745,7 @@ def test_plans_written_before_the_offset_existed_still_load(tmp_path):
            "camera": {"gain": 120, "exposure_us": 1000}}
     plan = SequencePlan.from_dict(old)
     assert plan.camera.gain == 120
-    assert plan.camera.offset == 30
+    assert plan.camera.offset == 1800
 
 
 # --------------------------------------------------------- the stage URI
@@ -791,3 +794,24 @@ def test_the_stage_uri_is_not_remembered_between_sessions(qapp, monkeypatch,
     assert win2.stage_uri.currentText() == ""
     win2.close()
     qapp.processEvents()
+
+
+def test_a_small_spot_survives_the_preview_decimation():
+    """The reason the spot was so hard to see in a test exposure.
+
+    Strided decimation keeps one pixel in 64, so a spot a few pixels across
+    usually falls between the samples and the preview shows nothing at all.
+    """
+    from fifa_gui.core.imageio import decimate, decimate_peak
+
+    frame = np.full((256, 256), 100, dtype=np.uint16)
+    frame[101:104, 203:206] = 9000          # a 3x3 spot, off the sampling grid
+
+    strided = decimate(frame, 8)
+    peaked = decimate_peak(frame, 8)
+
+    assert strided.max() == 100, "the old preview missed the spot entirely"
+    assert peaked.max() == 9000
+    assert peaked.shape == strided.shape
+    # Its block, so the position on screen is still right.
+    assert np.unravel_index(int(np.argmax(peaked)), peaked.shape) == (12, 25)

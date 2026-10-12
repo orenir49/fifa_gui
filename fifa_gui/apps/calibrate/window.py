@@ -317,7 +317,10 @@ class CalibrateWindow(QMainWindow):
         )
 
         self.offset = QSpinBox()
-        self.offset.setRange(0, 600)
+        # Wide enough for the real default; narrowed to the camera's own
+        # range on connect.
+        self.offset.setRange(0, 100_000)
+        self.offset.setGroupSeparatorShown(True)
         self.offset.setValue(DEFAULT_OFFSET)
         self.offset.setSuffix(" ADU")
         self.offset.setToolTip(
@@ -610,6 +613,7 @@ class CalibrateWindow(QMainWindow):
 
         self.worker.hardware_changed.connect(self._on_hardware_changed)
         self.worker.exposure_range.connect(self._on_exposure_range)
+        self.worker.offset_range.connect(self._on_offset_range)
         self.worker.position_changed.connect(self._on_position)
         self.worker.limits_changed.connect(self._on_limits)
         self.worker.temperature.connect(self._on_temperature)
@@ -690,6 +694,18 @@ class CalibrateWindow(QMainWindow):
             self.exposure.setValue(int(lo))
         self.exposure_hint.setText(
             f"= {self.exposure.value() / 1000.0:.3f} ms   (camera min {lo:,} us)"
+        )
+
+    @Slot(object)
+    def _on_offset_range(self, rng):
+        """Clamp the offset box to what this camera actually accepts."""
+        if not rng:
+            return
+        lo, hi, default = rng
+        self.offset.setRange(int(lo), int(hi))
+        self.offset.setToolTip(
+            f"ASI_OFFSET, the black level, in ADU.\n"
+            f"This camera accepts {lo:,} .. {hi:,} (default {default:,})."
         )
 
     @Slot(int)
