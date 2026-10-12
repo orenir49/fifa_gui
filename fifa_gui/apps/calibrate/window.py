@@ -49,9 +49,28 @@ CONTINUE_WAITING_STYLE = (
 )
 CONTINUE_IDLE_STYLE = ""
 
-#: Shown while the sequence is paused. Mentions the ND filter because forgetting
-#: to put it back is what saturates the frame.
-PAUSE_PROMPT = "CENTER FIBER, RETURN ND FILTER, THEN PRESS CONTINUE"
+#: Shown while the sequence is paused, in the order the steps are done: the
+#: filter comes out to see the spot and goes back before the frame is taken,
+#: because forgetting to put it back is what saturates the frame.
+PAUSE_PROMPT = "REMOVE ND FILTER, CENTER FIBER, RETURN ND FILTER, PRESS CONTINUE"
+
+#: Green when the device is open, red when it is not. With the panels behind
+#: buttons, these carry the hardware state as colour instead of as text.
+HARDWARE_OK_STYLE = (
+    "QPushButton { background: #166534; color: #dcfce7; font-weight: bold;"
+    " border: 1px solid #22c55e; border-radius: 4px; padding: 4px 10px; }"
+    "QPushButton:hover { background: #15803d; }"
+)
+HARDWARE_BAD_STYLE = (
+    "QPushButton { background: #7f1d1d; color: #fecaca; font-weight: bold;"
+    " border: 1px solid #ef4444; border-radius: 4px; padding: 4px 10px; }"
+    "QPushButton:disabled { background: #7f1d1d; color: #fecaca; }"
+)
+
+#: There is no default output directory on purpose: the operator must name the
+#: unit every run, or a sweep silently lands in the previous unit's folder.
+OUT_DIR_PROMPT = 'Choose output directory with the correct unit name, i.e. "./data/mast0x"'
+OUT_DIR_PROMPT_STYLE = "color: #ef4444; font-weight: bold;"
 
 
 class CalibrateWindow(QMainWindow):
@@ -153,6 +172,14 @@ class CalibrateWindow(QMainWindow):
         reconnect = QAction("&Reconnect", self)
         reconnect.triggered.connect(self._reconnect)
         hw_menu.addAction(reconnect)
+        # The toolbar buttons go dead when a device is not connected, so these
+        # stay live: without them a manual stage URI could not be typed.
+        stage_panel = QAction("&Stage panel...", self)
+        stage_panel.triggered.connect(lambda: self._show_popup(self.stage_dialog))
+        hw_menu.addAction(stage_panel)
+        camera_panel = QAction("&Camera panel...", self)
+        camera_panel.triggered.connect(lambda: self._show_popup(self.camera_dialog))
+        hw_menu.addAction(camera_panel)
         locate = QAction("&Locate ASICamera2.dll...", self)
         locate.triggered.connect(self.locate_dll)
         hw_menu.addAction(locate)
@@ -198,16 +225,14 @@ class CalibrateWindow(QMainWindow):
         self.stage_dialog = self._popup("Stage", self._build_stage_box())
         self.camera_dialog = self._popup("Camera", self._build_camera_box())
 
-        stage_btn = QPushButton("Stage...")
-        stage_btn.setToolTip("Controller URI, home, stop, and jog to a position")
-        stage_btn.clicked.connect(lambda: self._show_popup(self.stage_dialog))
-        camera_btn = QPushButton("Camera...")
-        camera_btn.setToolTip("Gain, exposure, image type and cooler")
-        camera_btn.clicked.connect(lambda: self._show_popup(self.camera_dialog))
+        self.stage_btn = QPushButton("Stage")
+        self.stage_btn.clicked.connect(lambda: self._show_popup(self.stage_dialog))
+        self.camera_btn = QPushButton("Camera")
+        self.camera_btn.clicked.connect(lambda: self._show_popup(self.camera_dialog))
 
         buttons = QHBoxLayout()
-        buttons.addWidget(stage_btn)
-        buttons.addWidget(camera_btn)
+        buttons.addWidget(self.stage_btn)
+        buttons.addWidget(self.camera_btn)
         buttons.addWidget(self.test_btn, 1)
 
         layout = QVBoxLayout()
@@ -333,13 +358,17 @@ class CalibrateWindow(QMainWindow):
         layout = QVBoxLayout(box)
 
         self.out_dir = QLineEdit()
-        self.out_dir.setPlaceholderText("where the .npy frames are written")
+        self.out_dir.setPlaceholderText("./data/mast0x")
         self.out_dir.textChanged.connect(lambda _: self._revalidate())
         browse = QPushButton("Browse...")
         browse.clicked.connect(self._choose_out_dir)
         dir_row = QHBoxLayout()
         dir_row.addWidget(self.out_dir, 1)
         dir_row.addWidget(browse)
+
+        self.out_dir_prompt = QLabel(OUT_DIR_PROMPT)
+        self.out_dir_prompt.setStyleSheet(OUT_DIR_PROMPT_STYLE)
+        self.out_dir_prompt.setWordWrap(True)
 
         # Back-off, settle, repeats and the operator pause are fixed: they are
         # properties of the bench, not of a run, and getting one of them wrong
@@ -415,6 +444,7 @@ class CalibrateWindow(QMainWindow):
 
         layout.addWidget(QLabel("Output directory"))
         layout.addLayout(dir_row)
+        layout.addWidget(self.out_dir_prompt)
         layout.addWidget(fixed)
         layout.addWidget(self.overwrite_check)
         self.sweep_limits_label = QLabel("Stage limits: not connected")
@@ -802,6 +832,21 @@ class CalibrateWindow(QMainWindow):
         for widget in (self.apply_btn, self.test_btn):
             widget.setEnabled(has_camera and not running)
 
+        # Green and clickable only while the device is open. Hardware > Stage /
+        # Camera still opens the panel when it is not, so a manual URI is
+        # reachable without a connection.
+        for button, ok, what in ((self.stage_btn, has_stage, "stage"),
+                                 (self.camera_btn, has_camera, "camera")):
+            button.setEnabled(ok)
+            button.setStyleSheet(HARDWARE_OK_STYLE if ok else HARDWARE_BAD_STYLE)
+            button.setToolTip(
+                f"{what.capitalize()} connected - open the {what} panel" if ok
+                else f"No {what} connected. Press Reconnect, or use the "
+                     f"Hardware menu to open the panel anyway."
+            )
+
+        self.out_dir_prompt.setVisible(not self.out_dir.text().strip())
+
         if not has_stage:
             tip = "No stage connected."
         elif not has_camera:
@@ -954,7 +999,9 @@ class CalibrateWindow(QMainWindow):
         geometry = s.value("geometry")
         if geometry:
             self.restoreGeometry(geometry)
-        self.out_dir.setText(s.value("out_dir", "", type=str))
+        # The output directory is deliberately NOT restored: it must be named
+        # for the unit being measured, and a remembered path silently writes
+        # the next sweep into the previous unit's folder.
         self.gain.setValue(int(s.value("gain", 120)))
         self.exposure.setValue(int(s.value("exposure_us", DEFAULT_EXPOSURE_US)))
         self.stage_uri.setEditText(s.value("stage_uri", "", type=str))
@@ -966,7 +1013,6 @@ class CalibrateWindow(QMainWindow):
     def _save_settings(self):
         s = self.settings
         s.setValue("geometry", self.saveGeometry())
-        s.setValue("out_dir", self.out_dir.text())
         s.setValue("gain", self.gain.value())
         s.setValue("exposure_us", self.exposure.value())
         s.setValue("stage_uri", self.stage_uri.currentText())

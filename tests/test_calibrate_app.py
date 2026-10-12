@@ -567,17 +567,23 @@ def test_the_hardware_panels_are_not_embedded_in_the_left_column(qapp, monkeypat
     qapp.processEvents()
 
 
-def test_the_compact_buttons_open_the_hardware_panels(qapp, monkeypatch):
-    from PySide6.QtWidgets import QPushButton
+def _connect(win, camera=True, stage=True):
+    """Drive the window to the state the worker reports when devices are open."""
+    win._on_hardware_changed(
+        FakeCamera().info() if camera else None,
+        FakeStage().info() if stage else None,
+        [],
+    )
 
+
+def test_the_compact_buttons_open_the_hardware_panels(qapp, monkeypatch):
     win = _no_hardware_window(monkeypatch)
-    buttons = {b.text(): b for b in win.centralWidget().findChildren(QPushButton)}
-    assert "Stage..." in buttons and "Camera..." in buttons
+    _connect(win)
 
     # click() returning at all is half the point: a modal dialog would block
     # here, and the preview has to stay watchable while the stage is jogged.
-    buttons["Stage..."].click()
-    buttons["Camera..."].click()
+    win.stage_btn.click()
+    win.camera_btn.click()
     qapp.processEvents()
     assert win.stage_dialog.isVisible()
     assert win.camera_dialog.isVisible()
@@ -589,4 +595,85 @@ def test_the_compact_buttons_open_the_hardware_panels(qapp, monkeypatch):
     assert _in_window(win.exposure, win.camera_dialog)
 
     win.close()
+    qapp.processEvents()
+
+
+def test_hardware_buttons_are_green_when_connected_red_and_dead_when_not(
+    qapp, monkeypatch
+):
+    """The buttons are the only hardware status on the main window."""
+    from fifa_gui.apps.calibrate.window import (
+        HARDWARE_BAD_STYLE, HARDWARE_OK_STYLE,
+    )
+
+    win = _no_hardware_window(monkeypatch)
+    for button in (win.stage_btn, win.camera_btn):
+        assert not button.isEnabled()
+        assert button.styleSheet() == HARDWARE_BAD_STYLE
+
+    _connect(win)
+    for button in (win.stage_btn, win.camera_btn):
+        assert button.isEnabled()
+        assert button.styleSheet() == HARDWARE_OK_STYLE
+
+    # One device missing must not make the other look connected.
+    _connect(win, camera=False)
+    assert win.stage_btn.isEnabled()
+    assert win.stage_btn.styleSheet() == HARDWARE_OK_STYLE
+    assert not win.camera_btn.isEnabled()
+    assert win.camera_btn.styleSheet() == HARDWARE_BAD_STYLE
+
+    # The panel still has to be reachable with nothing connected, or a manual
+    # stage URI could never be typed in.
+    _connect(win, camera=False, stage=False)
+    win._show_popup(win.stage_dialog)
+    qapp.processEvents()
+    assert win.stage_dialog.isVisible()
+    assert _in_window(win.stage_uri, win.stage_dialog)
+
+    win.close()
+    qapp.processEvents()
+
+
+def test_the_pause_prompt_takes_the_filter_out_and_puts_it_back(qapp, monkeypatch):
+    """Both halves of the ND filter step, in the order they are done."""
+    from fifa_gui.apps.calibrate.window import PAUSE_PROMPT
+
+    steps = ["REMOVE ND FILTER", "CENTER FIBER", "RETURN ND FILTER", "PRESS CONTINUE"]
+    assert [PAUSE_PROMPT.index(step) for step in steps] == sorted(
+        PAUSE_PROMPT.index(step) for step in steps
+    )
+
+    win = _no_hardware_window(monkeypatch)
+    win._on_state(STATE_WAITING_OPERATOR, {"position": 285000})
+    qapp.processEvents()
+    assert PAUSE_PROMPT in win.pause_label.text()
+    win.close()
+    qapp.processEvents()
+
+
+def test_the_output_directory_starts_empty_and_asks_for_a_unit_name(
+    qapp, monkeypatch, tmp_path, isolated_qsettings
+):
+    """A remembered path writes the next sweep into the previous unit's folder."""
+    from fifa_gui.apps.calibrate.window import OUT_DIR_PROMPT
+
+    win = _no_hardware_window(monkeypatch)
+    assert win.out_dir.text() == ""
+    assert win.out_dir_prompt.isVisibleTo(win)
+    assert "mast0x" in OUT_DIR_PROMPT
+    assert "#ef4444" in win.out_dir_prompt.styleSheet()       # red
+    assert "bold" in win.out_dir_prompt.styleSheet()
+
+    win.out_dir.setText(str(tmp_path))
+    qapp.processEvents()
+    assert not win.out_dir_prompt.isVisibleTo(win)
+
+    # Closing writes QSettings; the next window must still come up empty.
+    win.close()
+    qapp.processEvents()
+    win2 = _no_hardware_window(monkeypatch)
+    assert win2.out_dir.text() == ""
+    assert win2.out_dir_prompt.isVisibleTo(win2)
+    win2.close()
     qapp.processEvents()
