@@ -4,7 +4,9 @@ import logging
 import os
 
 import numpy as np
-from PySide6.QtCore import QSettings, Qt, QThreadPool, QTimer, Slot
+from PySide6.QtCore import (
+    QObject, QRunnable, QSettings, Qt, QThreadPool, QTimer, Signal, Slot,
+)
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QCheckBox, QDialog, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox,
@@ -22,14 +24,45 @@ from fifa_gui.core import export as core_export
 from fifa_gui.core.centroid import find_centroid
 from fifa_gui.core.flexure import DEFAULT_DIAMETER_UM, flexure_stats
 from fifa_gui.core.imageio import scan_directory
+from fifa_gui.core import unitsync
 from fifa_gui.core.unittable import UnitEntry, UnitTable, guess_unit_name
 from fifa_gui.qtutil.imageview import (
     COLOR_BKG, COLOR_CENTROID, COLOR_OTHER, COLOR_ROI, COLOR_TRACK, ImageView,
 )
 from fifa_gui.qtutil.mplcanvas import MplPanel
-from fifa_gui.paths import unit_table_path
+from fifa_gui.paths import app_dir, unit_table_path
 
 logger = logging.getLogger(__name__)
+
+
+class _CollectSignals(QObject):
+    done = Signal(object, str)      # [UnitEntry], where the table came from
+    failed = Signal(str)
+
+
+class _CollectTask(QRunnable):
+    """Gather unit entries off the GUI thread.
+
+    The git fetch is the slow part, and a window that freezes for it while
+    opening is worse than a table that fills in a moment later.
+    """
+
+    def __init__(self, table_path, roots, signals):
+        super().__init__()
+        self.table_path = table_path
+        self.roots = list(roots)
+        self.signals = signals
+
+    def run(self):
+        try:
+            text, where = unitsync.fetch_table_json(self.table_path)
+            entries = unitsync.entries_from_table_json(text)
+            entries += unitsync.scan_for_fit_exports(self.roots)
+        except Exception as exc:                 # never kill the pool thread
+            logger.exception("collecting units failed")
+            self.signals.failed.emit(str(exc))
+            return
+        self.signals.done.emit(entries, where)
 
 
 class _StatusLog:
@@ -59,6 +92,16 @@ CLIP_NEGATIVE = True      # a centre of mass with negative weights can
                           # land outside the data entirely
 UM_PER_PX = 2.35          # the notebook's ZWO scale
 STAGE_SPEC = 300000       # where the fiber position is reported
+
+#: Columns of the units table the operator fills in. They sit next to the
+#: unit name rather than past the source path, which is wide enough to push
+#: them off the side of the window.
+COL_STAGE, COL_X, COL_Y = 1, 2, 3
+
+#: There is no table-wide target: each unit is pinned where it matters for
+#: that unit, and nothing is reported until someone says where.
+UNIT_TARGET_PROMPT = "FILL IN EITHER STAGE OR X FOR EACH ENTRY"
+UNIT_TARGET_PROMPT_STYLE = "color: #ef4444; font-weight: bold;"
 DEFAULT_X_TARGET = 4400
 REFIT_DEBOUNCE_MS = 150
 
@@ -73,6 +116,8 @@ class CalculateWindow(QMainWindow):
         self.datasets = []           # list[Dataset]
         self._pending = {}           # directory -> frames still loading
         self._pool = QThreadPool()
+        self._units_refreshing = False
+        self._collecting = False
         self._pool.setMaxThreadCount(min(4, max(1, QThreadPool.globalInstance().maxThreadCount())))
         self._signals = LoaderSignals()
         self._signals.loaded.connect(self._on_frame_loaded)
@@ -91,6 +136,10 @@ class CalculateWindow(QMainWindow):
 
         self._build_ui()
         self._restore_settings()
+        # Gather what is already known before anyone asks: a unit measured
+        # on another machine, or exported months ago, should be in the
+        # table without someone remembering to add it.
+        QTimer.singleShot(0, self.collect_units)
         self.log.append_line(
             f"FIFA Calculate {__version__}. Add a dataset directory to begin."
         )
@@ -193,11 +242,15 @@ class CalculateWindow(QMainWindow):
             "and click-to-recentroid."
         )
         inspect_btn.clicked.connect(self._show_inspector)
+        export_btn = QPushButton("Export...")
+        export_btn.setToolTip("Write the CSV, JSON and PNG results (Ctrl+E)")
+        export_btn.clicked.connect(self.export_results)
         buttons = QHBoxLayout()
         buttons.addWidget(add_btn)
         buttons.addWidget(remove_btn)
         buttons.addWidget(reload_btn)
         buttons.addWidget(inspect_btn)
+        buttons.addWidget(export_btn)
 
         left = QWidget()
         left_layout = QVBoxLayout(left)
@@ -298,8 +351,13 @@ class CalculateWindow(QMainWindow):
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.addWidget(plots, 1)
-        right_layout.addWidget(self._build_params_box())
-        right_layout.addWidget(self._build_result_box())
+        # The Parameters and Fit-at-stage boxes used to sit here and left
+        # the figures too short to read. The parameters are fixed in code
+        # and listed in Help > About; the fit is one line under the plots.
+        self.result_label = QLabel('No fit yet.')
+        self.result_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.result_label.setStyleSheet('font-family: Consolas, monospace;')
+        right_layout.addWidget(self.result_label)
 
         splitter = QSplitter(Qt.Horizontal)
         splitter.addWidget(left)
@@ -315,41 +373,6 @@ class CalculateWindow(QMainWindow):
         self.inspector.show()
         self.inspector.raise_()
         self.inspector.activateWindow()
-
-    def _build_params_box(self):
-        """The reduction parameters, shown but not editable.
-
-        They are fixed in code at the notebook's values: every archived
-        mast0X/1 dataset was reduced with these, so a stray edit would quietly
-        make a new measurement incomparable with the ones already in the unit
-        table. Change them in one place, with a reason, or not at all.
-        """
-        box = QGroupBox("Parameters (fixed)")
-        form = QFormLayout(box)
-
-        def fixed(text):
-            label = QLabel(text)
-            label.setStyleSheet("font-family: Consolas, monospace;")
-            return label
-
-        form.addRow("ROI half-width", fixed(f"{HALF_WIDTH} px"))
-        form.addRow("Background offset", fixed(f"{BG_OFFSET} rows"))
-        form.addRow("Clip negatives", fixed("yes" if CLIP_NEGATIVE else "no"))
-        form.addRow("Pixel scale", fixed(f"{UM_PER_PX:g} um/px"))
-        form.addRow("Stage spec", fixed(f"{STAGE_SPEC:,}"))
-        return box
-
-    def _build_result_box(self):
-        box = QGroupBox(f"Fit at stage {STAGE_SPEC:,}")
-        layout = QVBoxLayout(box)
-        self.result_label = QLabel("No fit yet.")
-        self.result_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        layout.addWidget(self.result_label)
-
-        export_btn = QPushButton("Export results...")
-        export_btn.clicked.connect(self.export_results)
-        layout.addWidget(export_btn)
-        return box
 
     # --------------------------------------------------------- inverse tab
 
@@ -372,8 +395,9 @@ class CalculateWindow(QMainWindow):
 
     # ----------------------------------------------------------- units tab
 
-    UNIT_HEADERS = ["Unit", "a_x", "b_x", "a_y", "b_y", "RMS (px)", "Frames",
-                    "Updated (UTC)", "Source", "Stage", "x (col)", "y (row)"]
+    UNIT_HEADERS = ["Unit", "Stage", "x (col)", "y (row)",
+                    "a_x", "b_x", "a_y", "b_y", "RMS (px)", "Frames",
+                    "Updated (UTC)", "Source"]
 
     def _build_units_tab(self):
         widget = QWidget()
@@ -387,7 +411,7 @@ class CalculateWindow(QMainWindow):
         top.addWidget(self.unit_name)
         self.unit_update_btn = QPushButton("Update from selected dataset")
         self.unit_update_btn.setToolTip(
-            "Store the selected dataset's fit coefficients for this unit,\n"
+            "Store the selected dataset's fit coefficients for this unit, "
             "replacing the unit's previous entry, and save the table."
         )
         self.unit_update_btn.clicked.connect(self.update_unit_from_dataset)
@@ -395,50 +419,152 @@ class CalculateWindow(QMainWindow):
         self.unit_delete_btn = QPushButton("Delete unit")
         self.unit_delete_btn.clicked.connect(self.delete_unit)
         top.addWidget(self.unit_delete_btn)
+        self.unit_collect_btn = QPushButton("Collect units")
+        self.unit_collect_btn.setToolTip(
+            "Re-read every source: the table in git (fetching the remote copy "
+            "when it can), the fits.json files under the data roots, and the "
+            "datasets open here."
+        )
+        self.unit_collect_btn.clicked.connect(lambda: self.collect_units(announce=True))
+        top.addWidget(self.unit_collect_btn)
         top.addStretch(1)
         layout.addLayout(top)
 
-        interp = QHBoxLayout()
-        interp.addWidget(QLabel("Interpolate:"))
-        self.interp_mode = QComboBox()
-        self.interp_mode.addItems(["stage + y from x", "x + y from stage"])
-        self.interp_mode.currentIndexChanged.connect(self._on_interp_mode)
-        interp.addWidget(self.interp_mode)
-        self.interp_value = QDoubleSpinBox()
-        self.interp_value.setRange(-1e9, 1e9)
-        self.interp_value.setDecimals(2)
-        self.interp_value.setValue(DEFAULT_X_TARGET)
-        self.interp_value.valueChanged.connect(lambda _: self._refresh_units())
-        interp.addWidget(self.interp_value)
-        interp.addStretch(1)
-        layout.addLayout(interp)
+        self.units_prompt = QLabel(UNIT_TARGET_PROMPT)
+        self.units_prompt.setStyleSheet(UNIT_TARGET_PROMPT_STYLE)
+        self.units_prompt.setWordWrap(True)
+        layout.addWidget(self.units_prompt)
 
         self.units_table = QTableWidget(0, len(self.UNIT_HEADERS))
         self.units_table.setHorizontalHeaderLabels(self.UNIT_HEADERS)
-        self.units_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.units_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.units_table.verticalHeader().setVisible(False)
         self.units_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         self.units_table.itemSelectionChanged.connect(self._on_unit_selected)
+        self.units_table.itemChanged.connect(self._on_unit_cell_edited)
         layout.addWidget(self.units_table, 1)
 
         self.units_file_label = QLabel()
         self.units_file_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         layout.addWidget(self.units_file_label)
-        self._on_interp_mode()
-        return widget
-
-    def _on_interp_mode(self, *_):
-        from_x = self.interp_mode.currentIndex() == 0
-        self.interp_value.setValue(DEFAULT_X_TARGET if from_x else STAGE_SPEC)
-        self.interp_value.setPrefix("x = " if from_x else "stage = ")
-        self.interp_value.setDecimals(2 if from_x else 0)
+        # Show what the file already holds; collecting only adds to it, and it
+        # finishes after the window is up.
         self._refresh_units()
+        return widget
 
     def _on_unit_selected(self):
         rows = self.units_table.selectionModel().selectedRows()
         if rows:
-            self.unit_name.setText(self.units_table.item(rows[0].row(), 0).text())
+            item = self.units_table.item(rows[0].row(), 0)
+            if item is not None:
+                self.unit_name.setText(item.text())
+
+    def _on_unit_cell_edited(self, item):
+        """Either the stage or the column was typed; the other two follow."""
+        if self._units_refreshing or item.column() not in (COL_STAGE, COL_X):
+            return
+        name_item = self.units_table.item(item.row(), 0)
+        if name_item is None:
+            return
+        entry = self.unit_table.units.get(name_item.text())
+        if entry is None:
+            return
+
+        text = item.text().strip().replace(",", "")
+        try:
+            if not text:
+                entry.clear_target()
+            elif item.column() == COL_STAGE:
+                entry.set_target_stage(float(text))
+            else:
+                entry.set_target_x(float(text))
+        except ValueError as exc:
+            QMessageBox.warning(self, "Unit table", f"{entry.name}: {exc}")
+            self._refresh_units()
+            return
+
+        self._save_unit_table()
+        self._refresh_units()
+
+    def _save_unit_table(self):
+        try:
+            self.unit_table.save()
+        except OSError as exc:
+            QMessageBox.warning(self, "Unit table", f"Could not save the table:\n{exc}")
+            return False
+        return True
+
+    # -- collecting ---------------------------------------------------------
+
+    def _data_roots(self):
+        """Where exported fits might be: the data directories this session knows."""
+        roots = []
+        for dataset in self.datasets:
+            parent = os.path.dirname(os.path.abspath(dataset.directory))
+            roots.append(parent)
+            roots.append(os.path.dirname(parent))
+        last = self.settings.value("last_dir", "", type=str)
+        if last:
+            roots.append(last)
+            roots.append(os.path.dirname(os.path.abspath(last)))
+        roots.append(str(app_dir() / "data"))
+
+        seen, out = set(), []
+        for r in roots:
+            r = os.path.normpath(r)
+            if r and r not in seen and os.path.isdir(r):
+                seen.add(r)
+                out.append(r)
+        return out
+
+    def collect_units(self, announce=False):
+        """Merge every unit we can find, newest wins.
+
+        Runs off the GUI thread: a git fetch can sit for seconds on a slow
+        link, and the window must not freeze while it does.
+        """
+        if self._collecting:
+            return
+        self._collecting = True
+        signals = _CollectSignals()
+        signals.done.connect(
+            lambda entries, where: self._on_units_collected(entries, where, announce)
+        )
+        signals.failed.connect(self._on_collect_failed)
+        self._pool.start(
+            _CollectTask(str(self.unit_table.path), self._data_roots(), signals)
+        )
+
+    def _on_units_collected(self, entries, where, announce=False):
+        self._collecting = False
+        added, updated = unitsync.merge(self.unit_table, entries)
+
+        # Whatever is open right now is fresher than anything on disk.
+        live = 0
+        for dataset in self.datasets:
+            if dataset.fit is None:
+                continue
+            name = guess_unit_name(dataset.directory)
+            if not name:
+                continue
+            fresh = UnitEntry.from_fit(name, dataset.fit, source=dataset.directory)
+            a, u = unitsync.merge(self.unit_table, [fresh])
+            live += a + u
+
+        if added or updated or live:
+            self._save_unit_table()
+        self._refresh_units()
+        if announce or added or updated or live:
+            self.log.append_line(
+                f"Collected {len(entries)} entries from the {where}: "
+                f"{added} new, {updated} refreshed, {live} from open datasets."
+            )
+
+    def _on_collect_failed(self, message):
+        self._collecting = False
+        self.log.append_line(f"Could not collect units: {message}", logging.WARNING)
+
+    # -- the table ----------------------------------------------------------
 
     def update_unit_from_dataset(self):
         dataset = self._current_dataset()
@@ -450,11 +576,19 @@ class CalculateWindow(QMainWindow):
             name = guess_unit_name(dataset.directory)
             self.unit_name.setText(name)
         entry = UnitEntry.from_fit(name, dataset.fit, source=dataset.directory)
+        previous = self.unit_table.units.get(name)
+        if previous is not None and previous.has_target:
+            # The target is a decision about the unit, not a measurement, so a
+            # fresh fit re-solves it rather than dropping it.
+            try:
+                if previous.target_from == "x":
+                    entry.set_target_x(previous.target_x)
+                else:
+                    entry.set_target_stage(previous.target_stage)
+            except ValueError:
+                entry.clear_target()
         replaced = self.unit_table.update(entry)
-        try:
-            self.unit_table.save()
-        except OSError as exc:
-            QMessageBox.warning(self, "Unit table", f"Could not save the table:\n{exc}")
+        self._save_unit_table()
         self.log.append_line(
             f"{'Updated' if replaced else 'Added'} {name} in the unit table "
             f"(a_x={entry.coef_x[0]:.4e}, b_x={entry.coef_x[1]:.2f})."
@@ -469,41 +603,52 @@ class CalculateWindow(QMainWindow):
                 != QMessageBox.Yes:
             return
         self.unit_table.remove(name)
-        try:
-            self.unit_table.save()
-        except OSError as exc:
-            QMessageBox.warning(self, "Unit table", f"Could not save the table:\n{exc}")
+        self._save_unit_table()
         self._refresh_units()
 
     def _refresh_units(self):
         table = self.units_table
-        from_x = self.interp_mode.currentIndex() == 0
-        value = self.interp_value.value()
-        interp = {n: (a, b) for n, a, b in
-                  (self.unit_table.at_x(value) if from_x else self.unit_table.at_stage(value))}
-
         entries = self.unit_table.entries()
-        table.setRowCount(len(entries))
-        for r, e in enumerate(entries):
-            cells = [
-                e.name, f"{e.coef_x[0]:.6e}", f"{e.coef_x[1]:.3f}",
-                f"{e.coef_y[0]:.6e}", f"{e.coef_y[1]:.3f}",
-                "" if e.rms_px != e.rms_px else f"{e.rms_px:.3f}",
-                str(e.n_frames), e.updated_utc, e.source,
-            ]
-            if e.name in interp:
-                a, b = interp[e.name]
-                if from_x:      # a = stage, b = y
-                    cells += [f"{a:.0f}", f"{value:.2f}", f"{b:.2f}"]
-                else:           # a = x, b = y
-                    cells += [f"{value:.0f}", f"{a:.2f}", f"{b:.2f}"]
-            else:
-                cells += ["n/a", "", ""]
-            for c, text in enumerate(cells):
-                table.setItem(r, c, QTableWidgetItem(text))
-        self.units_file_label.setText(f"Table file: {self.unit_table.path}")
+        self._units_refreshing = True
+        try:
+            table.setRowCount(len(entries))
+            for r, e in enumerate(entries):
+                cells = [
+                    e.name,
+                    "" if e.target_stage is None else f"{e.target_stage:.0f}",
+                    "" if e.target_x is None else f"{e.target_x:.2f}",
+                    "" if e.target_y is None else f"{e.target_y:.2f}",
+                    f"{e.coef_x[0]:.6e}", f"{e.coef_x[1]:.3f}",
+                    f"{e.coef_y[0]:.6e}", f"{e.coef_y[1]:.3f}",
+                    "" if e.rms_px != e.rms_px else f"{e.rms_px:.3f}",
+                    str(e.n_frames), e.updated_utc, e.source,
+                ]
+                for c, text in enumerate(cells):
+                    item = QTableWidgetItem(text)
+                    if c == COL_Y:
+                        item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                        item.setToolTip("Follows from the stage or the column.")
+                    elif c in (COL_STAGE, COL_X):
+                        item.setToolTip(
+                            "Type a stage position or a column here; the other "
+                            "two follow from this unit's fit."
+                        )
+                        if e.target_from == ("stage" if c == COL_STAGE else "x"):
+                            font = item.font()
+                            font.setBold(True)
+                            item.setFont(font)
+                    else:
+                        item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                    table.setItem(r, c, item)
+        finally:
+            self._units_refreshing = False
 
-    # --------------------------------------------------------- flexure tab
+        missing = [e.name for e in entries if not e.has_target]
+        self.units_prompt.setVisible(bool(missing))
+        self.units_file_label.setText(
+            f"Table file: {self.unit_table.path}"
+            + (f"   |   no target yet: {', '.join(missing)}" if missing else "")
+        )
 
     # ------------------------------------------------------------- settings
 
@@ -673,16 +818,13 @@ class CalculateWindow(QMainWindow):
             return
 
         fit = dataset.fit
-        spec = STAGE_SPEC
-        scale = UM_PER_PX
+        used = sum(1 for r in dataset.records if r.usable)
         self.result_label.setText(
-            f"<b>{dataset.name}</b> at stage {spec}<br>"
-            f"x (column) = {fit.x_at(spec):.2f} &plusmn; {fit.sigma_x_at(spec):.2f} px<br>"
-            f"y (row)&nbsp;&nbsp;&nbsp; = {fit.y_at(spec):.2f} &plusmn; {fit.sigma_y_at(spec):.2f} px<br>"
-            f"residual rms {fit.rms():.2f} px ({fit.rms() * scale:.2f} um), "
-            f"max {np.max(np.abs(fit.residual_perp)):.2f} px<br>"
-            f"{sum(1 for r in dataset.records if r.usable)} of "
-            f"{len(dataset.records)} frames included"
+            f"{dataset.name} @ {STAGE_SPEC:,}:  "
+            f"x={fit.x_at(STAGE_SPEC):.2f}+-{fit.sigma_x_at(STAGE_SPEC):.2f}  "
+            f"y={fit.y_at(STAGE_SPEC):.2f}+-{fit.sigma_y_at(STAGE_SPEC):.2f} px  "
+            f"rms {fit.rms():.2f} px ({fit.rms() * UM_PER_PX:.2f} um)  "
+            f"{used}/{len(dataset.records)} frames"
         )
 
     def _draw_track(self):

@@ -9,3 +9,6 @@ __pycache__/
 
 # ZWO's proprietary SDK binary: fetched per machine by tools/fetch_asi_dll.ps1
 /vendor/zwo/ASICamera2.dll
+
+# Captured frames: large, and reproducible from the bench
+/data

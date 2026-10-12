@@ -13,6 +13,10 @@ from datetime import datetime, timezone
 SCHEMA = 1
 
 
+def _opt_float(v):
+    return None if v is None else float(v)
+
+
 @dataclass
 class UnitEntry:
     name: str
@@ -24,6 +28,14 @@ class UnitEntry:
     n_frames: int = 0
     source: str = ""
     updated_utc: str = ""
+    #: The one stage position this unit is reported at. Either the stage or
+    #: the column is chosen per unit, and the other two follow from the fit;
+    #: they are stored so the table in git carries the answer, not just the
+    #: coefficients to recompute it from.
+    target_stage: float = None
+    target_x: float = None
+    target_y: float = None
+    target_from: str = ""        # "stage" or "x": which one was typed
 
     # -- evaluation ---------------------------------------------------------
 
@@ -40,6 +52,31 @@ class UnitEntry:
         w = (x - b) / a
         return w, self.coef_y[0] * w + self.coef_y[1]
 
+    # -- the per-unit target ------------------------------------------------
+
+    def set_target_stage(self, w):
+        """Pin this unit at stage w; x and y follow from the fit."""
+        w = float(w)
+        x, y = self.xy_at(w)
+        self.target_stage, self.target_x, self.target_y = w, x, y
+        self.target_from = "stage"
+        return w, x, y
+
+    def set_target_x(self, x):
+        """Pin this unit at column x; the stage and y follow from the fit."""
+        w, y = self.stage_for_x(float(x))
+        self.target_stage, self.target_x, self.target_y = w, float(x), y
+        self.target_from = "x"
+        return w, float(x), y
+
+    def clear_target(self):
+        self.target_stage = self.target_x = self.target_y = None
+        self.target_from = ""
+
+    @property
+    def has_target(self):
+        return self.target_stage is not None and self.target_x is not None
+
     # -- serialisation ------------------------------------------------------
 
     def to_dict(self):
@@ -49,6 +86,10 @@ class UnitEntry:
             "rms_px": None if self.rms_px != self.rms_px else self.rms_px,
             "n_frames": self.n_frames, "source": self.source,
             "updated_utc": self.updated_utc,
+            "target_stage": self.target_stage,
+            "target_x": self.target_x,
+            "target_y": self.target_y,
+            "target_from": self.target_from,
         }
         return d
 
@@ -63,6 +104,10 @@ class UnitEntry:
             rms_px=float("nan") if rms is None else float(rms),
             n_frames=int(d.get("n_frames", 0)),
             source=d.get("source", ""), updated_utc=d.get("updated_utc", ""),
+            target_stage=_opt_float(d.get("target_stage")),
+            target_x=_opt_float(d.get("target_x")),
+            target_y=_opt_float(d.get("target_y")),
+            target_from=d.get("target_from", ""),
         )
 
     @classmethod

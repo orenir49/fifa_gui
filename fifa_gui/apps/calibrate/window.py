@@ -490,7 +490,7 @@ class CalibrateWindow(QMainWindow):
         self.auto_levels = QCheckBox("Auto")
         self.auto_levels.setChecked(True)
         self.auto_levels.setToolTip(
-            "Scale from the background up to the brightest pixel.\n"
+            "Scale from the darkest pixel to the brightest.\n"
             "Untick to set vmin and vmax by hand."
         )
         self.auto_levels.toggled.connect(self._on_auto_levels_toggled)
@@ -544,13 +544,13 @@ class CalibrateWindow(QMainWindow):
         self._redraw_last_frame()
 
     def _auto_levels_for(self, arr):
-        """Background floor up to the brightest pixel.
+        """Min to max of the frame.
 
-        Not a high percentile: the spot covers a handful of pixels out of 46
+        Not a percentile: the spot covers a handful of pixels out of 46
         million, so even the 99.5th percentile is still background and the
         whole frame clips to white.
         """
-        lo = float(np.percentile(arr, 50.0))
+        lo = float(arr.min())
         hi = float(arr.max())
         if hi <= lo:
             hi = lo + 1.0

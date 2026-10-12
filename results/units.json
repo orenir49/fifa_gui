@@ -1,0 +1,110 @@
+{
+  "schema": 1,
+  "convention": "x is the image column, y is the image row; col = coef_x[0]*w + coef_x[1], row = coef_y[0]*w + coef_y[1], w = stage position",
+  "units": {
+    "mast01": {
+      "coef_x": [
+        -0.024926133866508864,
+        12194.977533554136
+      ],
+      "coef_y": [
+        0.0007873720205816222,
+        2870.879107410339
+      ],
+      "sigma_x": [
+        3.3171493687290475e-05,
+        10.269042801673026
+      ],
+      "sigma_y": [
+        5.156499714084289e-05,
+        15.963199236649011
+      ],
+      "rms_px": 1.9523087309274656,
+      "n_frames": 6,
+      "source": "C:\\Users\\oreni\\Documents\\code\\lab\\mast01\\1",
+      "updated_utc": "2026-10-12T06:26:40+00:00",
+      "target_stage": null,
+      "target_x": null,
+      "target_y": null,
+      "target_from": ""
+    },
+    "mast02": {
+      "coef_x": [
+        -0.024907742747560573,
+        12067.431040756375
+      ],
+      "coef_y": [
+        -0.001358368620197759,
+        2876.754352862255
+      ],
+      "sigma_x": [
+        5.483249964783517e-05,
+        16.974788882994712
+      ],
+      "sigma_y": [
+        3.761162631654319e-05,
+        11.6436314297157
+      ],
+      "rms_px": 2.117225431436904,
+      "n_frames": 6,
+      "source": "C:\\Users\\oreni\\Documents\\code\\lab\\mast02\\1",
+      "updated_utc": "2026-10-12T06:26:40+00:00",
+      "target_stage": null,
+      "target_x": null,
+      "target_y": null,
+      "target_from": ""
+    },
+    "mast03": {
+      "coef_x": [
+        -0.024959923962277572,
+        12057.683763355697
+      ],
+      "coef_y": [
+        0.0004944925720946846,
+        2664.4772836582088
+      ],
+      "sigma_x": [
+        5.550782465919252e-05,
+        17.183852842668667
+      ],
+      "sigma_y": [
+        3.932299805590007e-05,
+        12.173429891622106
+      ],
+      "rms_px": 2.166030113346611,
+      "n_frames": 6,
+      "source": "C:\\Users\\oreni\\Documents\\code\\lab\\mast03\\1",
+      "updated_utc": "2026-10-12T06:26:40+00:00",
+      "target_stage": null,
+      "target_x": null,
+      "target_y": null,
+      "target_from": ""
+    },
+    "mast04": {
+      "coef_x": [
+        -0.025002718550979002,
+        11896.637576364894
+      ],
+      "coef_y": [
+        0.0014022458512073473,
+        2115.8164814097536
+      ],
+      "sigma_x": [
+        6.116548031948989e-05,
+        18.935323430787648
+      ],
+      "sigma_y": [
+        5.885190956497402e-05,
+        18.21909901322495
+      ],
+      "rms_px": 2.7027447897087216,
+      "n_frames": 6,
+      "source": "C:\\Users\\oreni\\Documents\\code\\lab\\mast04\\1",
+      "updated_utc": "2026-10-12T06:26:40+00:00",
+      "target_stage": null,
+      "target_x": null,
+      "target_y": null,
+      "target_from": ""
+    }
+  }
+}

@@ -319,13 +319,24 @@ def test_unit_table_update_and_interpolate(window, qapp, dataset_a, tmp_path):
     assert entry.coef_x == pytest.approx(tuple(fit.coef_x))
     assert entry.xy_at(300000) == pytest.approx((fit.x_at(300000), fit.y_at(300000)))
 
-    # inverse round trip, and the GUI table fills the interpolated columns
+    # inverse round trip, and a per-entry target fills the other two columns
     x, y = entry.xy_at(250000)
     w, y2 = entry.stage_for_x(x)
     assert w == pytest.approx(250000) and y2 == pytest.approx(y)
-    window.interp_mode.setCurrentIndex(1)
-    window.interp_value.setValue(250000)
-    assert window.units_table.item(0, 10).text() == f"{x:.2f}"
+
+    from fifa_gui.apps.calculate.window import COL_STAGE, COL_X, COL_Y
+
+    window.units_table.item(0, COL_STAGE).setText("250000")
+    qapp.processEvents()
+    assert window.units_table.item(0, COL_X).text() == f"{x:.2f}"
+    assert window.units_table.item(0, COL_Y).text() == f"{y:.2f}"
+
+    # ... and typing the column instead solves back to the same stage
+    window.units_table.item(0, COL_X).setText(f"{x:.6f}")
+    qapp.processEvents()
+    assert float(window.units_table.item(0, COL_STAGE).text()) == pytest.approx(
+        250000, abs=1
+    )
 
     # updating again replaces, never duplicates
     window.update_unit_from_dataset()
