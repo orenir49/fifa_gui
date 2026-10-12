@@ -352,6 +352,14 @@ class AcquisitionWorker(QObject):
         }
 
         try:
+            # Make the output directory rather than refusing to start: the
+            # operator names it for the unit being measured, so it is new far
+            # more often than not.
+            if plan.out_dir and not os.path.isdir(plan.out_dir):
+                os.makedirs(plan.out_dir, exist_ok=True)
+                self.log.emit(logging.INFO, f"created {plan.out_dir}")
+                record["created_out_dir"] = True
+
             applied = self._camera.configure(plan.camera)
             self.log.emit(logging.INFO, f"camera set to {applied}")
             record["camera_applied"] = applied

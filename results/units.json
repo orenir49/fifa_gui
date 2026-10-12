@@ -22,10 +22,10 @@
       "rms_px": 1.9523087309274656,
       "n_frames": 6,
       "source": "C:\\Users\\oreni\\Documents\\code\\lab\\mast01\\1",
-      "updated_utc": "2026-10-12T06:57:47+00:00",
-      "target_stage": 300687.5263405571,
-      "target_x": 4700.0,
-      "target_y": 3107.632052588793,
+      "updated_utc": "2026-10-12T07:46:39+00:00",
+      "target_stage": 308711.23354966915,
+      "target_x": 4500.0,
+      "target_y": 3113.949695146587,
       "target_from": "x"
     },
     "mast02": {

@@ -85,6 +85,22 @@ class SequencePlan:
         return cls(camera=CameraSettings(**cam), **d)
 
 
+def nearest_existing(path):
+    """The closest ancestor of `path` that exists, or None if none does.
+
+    A drive that is not mounted has no existing ancestor, which is the case
+    worth telling an operator about: everything else can simply be created.
+    """
+    current = os.path.abspath(path)
+    while True:
+        if os.path.isdir(current):
+            return current
+        parent = os.path.dirname(current)
+        if parent == current:          # reached the root
+            return None
+        current = parent
+
+
 @dataclass
 class Problem:
     level: str   # "error" blocks the run; "warning" does not
@@ -122,21 +138,36 @@ def validate(plan, limits=None):
 
     if not plan.out_dir:
         problems.append(Problem("error", "No output directory selected."))
-    elif not os.path.isdir(plan.out_dir):
-        problems.append(Problem("error", f"Output directory does not exist: {plan.out_dir}"))
     else:
-        if not os.access(plan.out_dir, os.W_OK):
-            problems.append(Problem("error", f"Output directory is not writable: {plan.out_dir}"))
+        # A directory that is not there yet is not a problem -- the run creates
+        # it. What matters is whether it CAN be created, so the writability and
+        # free-space checks run against the nearest parent that does exist.
+        exists = os.path.isdir(plan.out_dir)
+        anchor = plan.out_dir if exists else nearest_existing(plan.out_dir)
+        if not exists:
+            problems.append(
+                Problem("warning", f"Output directory will be created: {plan.out_dir}")
+            )
+
+        if anchor is None:
+            problems.append(
+                Problem("error", f"Nothing of this path exists and it cannot be "
+                                 f"created: {plan.out_dir}")
+            )
+        elif not os.access(anchor, os.W_OK):
+            problems.append(
+                Problem("error", f"Output directory is not writable: {anchor}")
+            )
         else:
             need = plan.frame_count * FRAME_BYTES
-            free = shutil.disk_usage(plan.out_dir).free
+            free = shutil.disk_usage(anchor).free
             if free < need:
                 problems.append(
                     Problem("error", f"Need {need / 1e9:.1f} GB for {plan.frame_count} frames "
                                      f"but only {free / 1e9:.1f} GB is free.")
                 )
 
-        if not plan.overwrite:
+        if exists and not plan.overwrite:
             # Positions are achieved, not commanded, so a collision is a guess --
             # warn rather than block.
             existing = {n for n in os.listdir(plan.out_dir) if n.endswith(".npy")}

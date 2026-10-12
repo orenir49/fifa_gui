@@ -850,3 +850,49 @@ def test_the_bias_cannot_wrap_a_saturated_pixel(worker):
     assert lifted.dtype == np.uint16
     assert lifted.max() == 65535
     assert lifted.min() == 65535      # 65000 + 1800 clips too
+
+
+# ------------------------------------------------- the output directory
+
+def test_a_missing_output_directory_is_a_warning_not_a_blocker(tmp_path):
+    """The operator names it for the unit, so it is new more often than not."""
+    from fifa_gui.core.sequence import validate
+
+    plan = _plan(tmp_path, out_dir=str(tmp_path / "mast09" / "1"))
+    problems = validate(plan)
+
+    assert not [p for p in problems if p.level == "error"]
+    assert any("will be created" in p.text for p in problems if p.level == "warning")
+
+
+def test_an_unreachable_output_path_is_still_an_error():
+    from fifa_gui.core.sequence import nearest_existing, validate
+
+    plan = _plan_on(r"Q:\no\such\drive\mast09")
+    errors = [p.text for p in validate(plan) if p.level == "error"]
+    assert errors and "cannot be created" in errors[0]
+    assert nearest_existing(r"Q:\no\such\drive") is None
+
+
+def _plan_on(out_dir):
+    return SequencePlan(targets=[285000], out_dir=out_dir,
+                        pause_for_operator=False, settle_ms=0,
+                        camera=CameraSettings(exposure_us=1000))
+
+
+def test_nearest_existing_walks_up_to_a_real_parent(tmp_path):
+    from fifa_gui.core.sequence import nearest_existing
+
+    assert nearest_existing(str(tmp_path)) == str(tmp_path)
+    deep = tmp_path / "a" / "b" / "c"
+    assert nearest_existing(str(deep)) == str(tmp_path)
+
+
+def test_the_sequence_creates_the_output_directory(worker, qapp, tmp_path):
+    out = tmp_path / "mast09" / "run1"
+    assert not out.exists()
+
+    worker._run_sequence(_plan(tmp_path, out_dir=str(out), targets=[285000]))
+
+    assert out.is_dir()
+    assert sorted(p.name for p in out.glob("*.npy"))
