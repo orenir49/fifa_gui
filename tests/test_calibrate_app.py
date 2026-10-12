@@ -815,3 +815,38 @@ def test_a_small_spot_survives_the_preview_decimation():
     assert peaked.shape == strided.shape
     # Its block, so the position on screen is still right.
     assert np.unravel_index(int(np.argmax(peaked)), peaked.shape) == (12, 25)
+
+
+def test_the_test_exposure_is_lifted_onto_a_bias(worker, qapp):
+    """The live test frame gets an artificial black level; nothing else does."""
+    from fifa_gui.apps.calibrate.worker import TEST_EXPOSURE_BIAS_ADU
+
+    frames = []
+    worker.frame_ready.connect(lambda preview, meta: frames.append((preview, meta)))
+    worker._test_exposure(CameraSettings(exposure_us=1000))
+
+    assert len(frames) == 1
+    preview, meta = frames[0]
+    assert meta["bias_added"] == TEST_EXPOSURE_BIAS_ADU
+    assert preview.min() >= TEST_EXPOSURE_BIAS_ADU
+
+
+def test_the_bias_never_reaches_a_saved_frame(worker, qapp, tmp_path):
+    """A sequence frame is written exactly as the camera returned it."""
+    worker._run_sequence(_plan(tmp_path, targets=[285000]))
+
+    saved = sorted(tmp_path.glob("*.npy"))
+    assert saved
+    on_disk = np.load(saved[0])
+    assert on_disk.max() == worker._camera.capture().max()
+
+
+def test_the_bias_cannot_wrap_a_saturated_pixel(worker):
+    """uint16 + 1800 must clip, not roll over to zero."""
+    frame = np.full((4, 4), 65000, dtype=np.uint16)
+    frame[0, 0] = 65535
+
+    lifted = worker._apply_test_bias(frame)
+    assert lifted.dtype == np.uint16
+    assert lifted.max() == 65535
+    assert lifted.min() == 65535      # 65000 + 1800 clips too

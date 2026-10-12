@@ -35,6 +35,18 @@ POLL_MS = 50
 POSITION_EMIT_S = 0.2
 PREVIEW_DECIMATION = 8
 
+#: Added to the live test-exposure frame, in the array's own units, to
+#: look at it on a high black level. It is applied here and nowhere else:
+#: sequence frames are written exactly as the camera returned them, so
+#: nothing saved or fitted ever carries it.
+#:
+#: A constant does not make a spot easier to see under a linear min-max
+#: stretch -- both ends of the scale move with it. It shifts the floor off
+#: zero, which is what a real ASI_OFFSET does, except that a hardware
+#: offset is applied before the ADC and so can recover signal that would
+#: otherwise clip at zero. This cannot: what already clipped stays lost.
+TEST_EXPOSURE_BIAS_ADU = 1800
+
 STATE_IDLE = "IDLE"
 STATE_RUNNING = "RUNNING"
 STATE_WAITING_OPERATOR = "WAITING_OPERATOR"
@@ -291,6 +303,16 @@ class AcquisitionWorker(QObject):
             "shape": image.shape,
         }
 
+    def _apply_test_bias(self, image):
+        """Lift the test frame onto a high bias level, without wrapping."""
+        if not TEST_EXPOSURE_BIAS_ADU:
+            return image
+        if np.issubdtype(image.dtype, np.integer):
+            ceiling = np.iinfo(image.dtype).max
+            lifted = image.astype(np.int64) + TEST_EXPOSURE_BIAS_ADU
+            return np.minimum(lifted, ceiling).astype(image.dtype)
+        return image + TEST_EXPOSURE_BIAS_ADU
+
     def _expose(self, timeout_s):
         # One capture() call, never start_exposure() first: zwoasi's capture()
         # starts the exposure itself, so the notebook exposed every frame twice.
@@ -300,12 +322,16 @@ class AcquisitionWorker(QObject):
         self._camera.configure(settings)
         self.log.emit(logging.INFO, "test exposure ...")
         image = self._expose(max(settings.exposure_s * 4 + 30, 30))
+        image = self._apply_test_bias(image)
         meta = self._frame_metadata(image)
+        meta["bias_added"] = TEST_EXPOSURE_BIAS_ADU
         self.frame_ready.emit(decimate_peak(image, PREVIEW_DECIMATION), meta)
         self.log.emit(
             logging.INFO,
             f"test exposure peak {meta['peak']:.0f} ADU "
             f"({meta['peak_native']:.0f}/4095)"
+            + (f"  (+{TEST_EXPOSURE_BIAS_ADU} artificial bias)"
+               if TEST_EXPOSURE_BIAS_ADU else "")
             + ("  SATURATED" if meta["saturated"] else ""),
         )
 

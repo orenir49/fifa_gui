@@ -100,8 +100,10 @@ COL_STAGE, COL_X, COL_Y = 1, 2, 3
 
 #: There is no table-wide target: each unit is pinned where it matters for
 #: that unit, and nothing is reported until someone says where.
-UNIT_TARGET_PROMPT = "FILL IN EITHER STAGE OR X FOR EACH ENTRY"
-UNIT_TARGET_PROMPT_STYLE = "color: #ef4444; font-weight: bold;"
+UNIT_TARGET_PROMPT = "FILL IN EITHER X OR STAGE TO CALCULATE FIBER POSITION"
+UNIT_TARGET_PROMPT_STYLE = (
+    "color: #16a34a; font-weight: bold; font-size: 16pt;"
+)
 DEFAULT_X_TARGET = 4400
 REFIT_DEBOUNCE_MS = 150
 
@@ -643,8 +645,9 @@ class CalculateWindow(QMainWindow):
         finally:
             self._units_refreshing = False
 
+        # Standing instruction, not a warning: it says how the table works, so
+        # it stays up once every row is filled in.
         missing = [e.name for e in entries if not e.has_target]
-        self.units_prompt.setVisible(bool(missing))
         self.units_file_label.setText(
             f"Table file: {self.unit_table.path}"
             + (f"   |   no target yet: {', '.join(missing)}" if missing else "")

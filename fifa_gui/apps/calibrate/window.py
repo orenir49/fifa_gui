@@ -775,12 +775,14 @@ class CalibrateWindow(QMainWindow):
         self._last_meta = meta
         self._redraw_last_frame()
         saturated = "  SATURATED" if meta["saturated"] else ""
+        bias = meta.get("bias_added") or 0
+        added = f"   (+{bias:,} bias added)" if bias else ""
         position = meta.get("position")
         where = f"stage {position:,}   " if position is not None else ""
         self.frame_label.setText(
             f"{where}peak {meta['peak']:.0f} ADU "
             f"({meta['peak_native']:.0f}/4095){saturated}   "
-            f"{meta['shape'][1]} x {meta['shape'][0]}"
+            f"{meta['shape'][1]} x {meta['shape'][0]}{added}"
         )
 
     @Slot(str, int)
